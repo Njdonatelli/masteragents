@@ -1,0 +1,49 @@
+name: Deploy
+
+# Continuous deployment to the self-hosted box. Triggers ONLY on push to main
+# (post-merge = trusted code) and manual dispatch — never on pull_request — so
+# fork PRs can't run on the self-hosted runner. The frontend deploys separately
+# via Vercel; this handles the agent backend / Python services on the box.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, deploy]
+    steps:
+      - name: Fast-forward working tree + restart what changed
+        run: |
+          set -euo pipefail
+          cd /home/yichuan/visrag
+
+          # Safety: this box is also a dev machine. Only deploy when it's on a
+          # clean main — never clobber in-progress branch work.
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$branch" != "main" ]; then
+            echo "::warning::deploy box is on '$branch', not main — skipping (deploy manually when back on main)"
+            exit 0
+          fi
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::warning::deploy box has uncommitted changes — skipping to avoid clobbering"
+            echo "### Deploy skipped: the box has uncommitted changes" >> "$GITHUB_STEP_SUMMARY"
+            git status --short >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Measure the change set from where this box actually is, not from
+          # github.event.before. A manual dispatch carries no `before`, and
+          # deploy.sh then falls back to the tip commit alone — so everything
+          # the box was behind by is invisible and the services that changed
+          # are never restarted, while the run still reports success. The
+          # tree's own HEAD is right for both triggers and for a box that has
+          # fallen several commits behind.
+          before=$(git rev-parse HEAD)
+          git fetch origin main
+          git merge --ff-only origin/main
+          bash deploy/deploy.sh "$before"

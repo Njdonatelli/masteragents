@@ -1,0 +1,1608 @@
+use super::*;
+
+#[test]
+fn trusted_types_csp_policy_creation_matches_only_valid_name_tokens() {
+    for (policy, name, expected) in [
+        ("trusted-types valid policy*name", "valid", "allowed"),
+        (
+            "trusted-types valid policy*name",
+            "policy*name",
+            "TypeError",
+        ),
+        ("trusted-types none allow-duplicates", "none", "allowed"),
+        (
+            "trusted-types none allow-duplicates",
+            "allow-duplicates",
+            "allowed",
+        ),
+        (
+            "trusted-types ignored política; trusted-types valid",
+            "valid",
+            "allowed",
+        ),
+        (
+            "trusted-types ignored política; trusted-types valid",
+            "ignored",
+            "TypeError",
+        ),
+        ("trusted-types \u{000b}*", "arbitrary", "TypeError"),
+        ("trusted-types *", "name with spaces", "allowed"),
+        ("", "name with spaces", "allowed"),
+        ("trusted-types valid", "policy$name", "TypeError"),
+    ] {
+        let mut vm = new_storage_test_vm("https://trusted-types-name-grammar.test/");
+        vm.set_response_content_security_policies(&[policy.to_owned()]);
+        let script = format!(
+            "(() => {{ try {{ trustedTypes.createPolicy({}, {{createHTML: value => value}}); return 'allowed'; }} catch (error) {{ return error.name; }} }})()",
+            serde_json::to_string(name).unwrap(),
+        );
+        assert_eq!(vm.eval(&script).unwrap(), expected, "{policy:?}, {name:?}");
+    }
+}
+
+#[test]
+fn trusted_type_policy_callbacks_follow_webidl_dictionary_and_callback_rules() {
+    let mut vm = new_storage_test_vm("https://trusted-type-policy-webidl.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const errorName = callback => {
+    try {
+      callback();
+      return "none";
+    } catch (error) {
+      return error.constructor.name;
+    }
+  };
+  const methodTypes = policy => [
+    typeof policy.createHTML,
+    typeof policy.createScript,
+    typeof policy.createScriptURL
+  ];
+
+  const emptyFromNull = trustedTypes.createPolicy("empty-null", null);
+  const emptyFromOmission = trustedTypes.createPolicy("empty-omitted");
+  const extra = { marker: "extra" };
+  let observed;
+  class NullCallbacks {
+    createHTML(input, ...rest) {
+      observed = [this === undefined, input, rest.length, rest[0] === extra, rest[1]];
+      return null;
+    }
+    createScript() {
+      return null;
+    }
+    createScriptURL() {
+      return null;
+    }
+  }
+  const nullPolicy = trustedTypes.createPolicy("null-results", new NullCallbacks());
+  const nullResults = [
+    String(nullPolicy.createHTML({ toString: () => "converted" }, extra, 42)),
+    String(nullPolicy.createScript("script")),
+    String(nullPolicy.createScriptURL("script-url"))
+  ];
+
+  const variadicPolicy = trustedTypes.createPolicy("variadic", {
+    createHTML: (a, b, c) => a + b + c,
+    createScript: (a, b, c) => a + b + c,
+    createScriptURL: (a, b, c) => a + b + c
+  });
+  const variadicResults = [
+    String(variadicPolicy.createHTML("a", "b", "c")),
+    String(variadicPolicy.createScript("a", "b")),
+    String(variadicPolicy.createScriptURL("a", 123, null))
+  ];
+
+  return JSON.stringify({
+    emptyMethods: [methodTypes(emptyFromNull), methodTypes(emptyFromOmission)],
+    missingCallbacks: [emptyFromNull, emptyFromOmission].map(policy =>
+      ['createHTML', 'createScript', 'createScriptURL'].map(method =>
+        errorName(() => policy[method]('input')))),
+    nullResults,
+    observed,
+    variadicResults,
+    errors: [
+      errorName(() => trustedTypes.createPolicy("primitive-options", 1)),
+      errorName(() => trustedTypes.createPolicy("non-callable", { createHTML: null })),
+      errorName(() => trustedTypes.createPolicy("throwing-getter", {
+        get createHTML() { throw new RangeError("getter"); }
+      })),
+      errorName(() => nullPolicy.createHTML())
+    ]
+  });
+})()
+"#,
+        )
+        .expect("TrustedTypePolicy WebIDL callback probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"emptyMethods":[["function","function","function"],["function","function","function"]],"missingCallbacks":[["TypeError","TypeError","TypeError"],["TypeError","TypeError","TypeError"]],"nullResults":["","",""],"observed":[true,"converted",2,true,42],"variadicResults":["abc","abundefined","a123null"],"errors":["TypeError","TypeError","RangeError","TypeError"]}"#
+    );
+}
+
+#[test]
+fn element_markup_sinks_enforce_trusted_html_and_standard_sink_names() {
+    let mut vm = new_storage_test_vm("https://element-markup-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const throwsTypeError = callback => {
+    try {
+      callback();
+      return false;
+    } catch (error) {
+      return error instanceof TypeError;
+    }
+  };
+  const rejected = [];
+
+  const inner = document.createElement("div");
+  rejected.push(throwsTypeError(() => { inner.innerHTML = "<b>blocked</b>"; }));
+  rejected.push(throwsTypeError(() => { inner.innerHTML = null; }));
+
+  const shadowHost = document.createElement("div");
+  const shadow = shadowHost.attachShadow({ mode: "open" });
+  rejected.push(throwsTypeError(() => { shadow.innerHTML = "<b>blocked</b>"; }));
+
+  const outerContainer = document.createElement("div");
+  const outer = document.createElement("span");
+  outerContainer.appendChild(outer);
+  rejected.push(throwsTypeError(() => { outer.outerHTML = "<b>blocked</b>"; }));
+
+  const unsafe = document.createElement("div");
+  rejected.push(throwsTypeError(() => unsafe.setHTMLUnsafe("<b>blocked</b>")));
+  rejected.push(throwsTypeError(() => shadow.setHTMLUnsafe("<b>blocked</b>")));
+
+  const adjacent = document.createElement("div");
+  rejected.push(throwsTypeError(() => adjacent.insertAdjacentHTML("beforeend", "<b>blocked</b>")));
+
+  const policy = trustedTypes.createPolicy("element-markup", {
+    createHTML: value => value
+  });
+  const trusted = policy.createHTML("<b>trusted</b>");
+  const documentRoot = document.documentElement ||
+    document.appendChild(document.createElement("html"));
+  let documentOuterError = "none";
+  try {
+    documentRoot.outerHTML = trusted;
+  } catch (error) {
+    documentOuterError = `${error.name}:${error.code}`;
+  }
+  inner.innerHTML = trusted;
+  shadow.innerHTML = trusted;
+  unsafe.setHTMLUnsafe(trusted);
+  shadow.setHTMLUnsafe(trusted);
+  adjacent.insertAdjacentHTML("beforeend", trusted);
+
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createHTML: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return value;
+    }
+  });
+  const defaultInner = document.createElement("div");
+  defaultInner.innerHTML = null;
+  const defaultOuterContainer = document.createElement("div");
+  const defaultOuter = document.createElement("span");
+  defaultOuterContainer.appendChild(defaultOuter);
+  defaultOuter.outerHTML = null;
+  const defaultUnsafe = document.createElement("div");
+  defaultUnsafe.setHTMLUnsafe(null);
+  const defaultAdjacent = document.createElement("div");
+  defaultAdjacent.insertAdjacentHTML("beforeend", null);
+
+  return JSON.stringify({
+    rejected,
+    documentOuterError,
+    accepted: [
+      inner.innerHTML,
+      shadow.innerHTML,
+      unsafe.innerHTML,
+      adjacent.innerHTML
+    ],
+    defaultValues: [
+      defaultInner.innerHTML,
+      defaultOuterContainer.innerHTML,
+      defaultUnsafe.innerHTML,
+      defaultAdjacent.innerHTML
+    ],
+    defaultCalls
+  });
+})()
+"#,
+        )
+        .expect("Element markup TrustedHTML sink probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"rejected":[true,true,true,true,true,true,true],"documentOuterError":"NoModificationAllowedError:7","accepted":["<b>trusted</b>","<b>trusted</b>","<b>trusted</b>","<b>trusted</b>"],"defaultValues":["","","null","null"],"defaultCalls":[["","TrustedHTML","Element innerHTML"],["","TrustedHTML","Element outerHTML"],["null","TrustedHTML","Element setHTMLUnsafe"],["null","TrustedHTML","Element insertAdjacentHTML"]]}"#
+    );
+}
+
+#[test]
+fn document_parse_html_unsafe_gates_converted_union_source() {
+    let mut vm = new_storage_test_vm("https://document-parse-html-unsafe-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const errorName = callback => {
+    try {
+      callback();
+      return "none";
+    } catch (error) {
+      return error && error.name;
+    }
+  };
+  const custom = trustedTypes.createPolicy("document-parse-html-unsafe-custom", {
+    createHTML: value => value
+  });
+  const blocked = [
+    errorName(() => Document.parseHTMLUnsafe("<p>blocked</p>")),
+    errorName(() => Document.parseHTMLUnsafe(null))
+  ];
+  const trusted = Document.parseHTMLUnsafe(
+    custom.createHTML("<main>trusted</main>")
+  ).body.innerText;
+
+  let sourceConversions = 0;
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createHTML: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return value === "source" ? "<p>default</p>" : value;
+    }
+  });
+  const source = {
+    toString() {
+      sourceConversions += 1;
+      return "source";
+    }
+  };
+  const defaultValues = [
+    Document.parseHTMLUnsafe(source).body.innerText,
+    Document.parseHTMLUnsafe(null).body.innerText
+  ];
+  const callsBeforeMissing = defaultCalls.length;
+  const missing = errorName(() => Document.parseHTMLUnsafe());
+  const missingSkippedPolicy = defaultCalls.length === callsBeforeMissing;
+  const callsBeforeSymbol = defaultCalls.length;
+  const symbol = errorName(() => Document.parseHTMLUnsafe(Symbol()));
+  const symbolSkippedPolicy = defaultCalls.length === callsBeforeSymbol;
+
+  return JSON.stringify({
+    blocked,
+    trusted,
+    defaultValues,
+    sourceConversions,
+    missing,
+    missingSkippedPolicy,
+    symbol,
+    symbolSkippedPolicy,
+    defaultCalls
+  });
+})()
+"#,
+        )
+        .expect("Document.parseHTMLUnsafe TrustedHTML union probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"blocked":["TypeError","TypeError"],"trusted":"trusted","defaultValues":["default","null"],"sourceConversions":1,"missing":"TypeError","missingSkippedPolicy":true,"symbol":"TypeError","symbolSkippedPolicy":true,"defaultCalls":[["source","TrustedHTML","Document parseHTMLUnsafe"],["null","TrustedHTML","Document parseHTMLUnsafe"]]}"#
+    );
+}
+
+#[test]
+fn script_elements_preserve_only_parser_or_trusted_script_source() {
+    let mut vm = new_storage_test_vm("https://script-source-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.body ||
+    (document.documentElement || document.appendChild(document.createElement("html")))
+      .appendChild(document.createElement("body"));
+  globalThis.__trustedScriptRuns = [];
+  const policy = trustedTypes.createPolicy("script-source", {
+    createScript: value => value
+  });
+  const rejected = document.createElement("script");
+  let rejectedPlainText = false;
+  try {
+    rejected.text = "globalThis.__trustedScriptRuns.push('plain-text')";
+  } catch (error) {
+    rejectedPlainText = error instanceof TypeError;
+  }
+  let rejectedPlainInnerText = false;
+  try {
+    document.createElement("script").innerText = "blocked";
+  } catch (error) {
+    rejectedPlainInnerText = error instanceof TypeError;
+  }
+  let rejectedPlainTextContent = false;
+  try {
+    document.createElement("script").textContent = "blocked";
+  } catch (error) {
+    rejectedPlainTextContent = error instanceof TypeError;
+  }
+
+  const trusted = document.createElement("script");
+  trusted.text = policy.createScript("globalThis.__trustedScriptRuns.push('trusted')");
+  root.appendChild(trusted);
+
+  const trustedInnerText = document.createElement("script");
+  trustedInnerText.innerText = policy.createScript(
+    "globalThis.__trustedScriptRuns.push('inner-text')"
+  );
+  root.appendChild(trustedInnerText);
+
+  const trustedTextContent = document.createElement("script");
+  trustedTextContent.textContent = policy.createScript(
+    "globalThis.__trustedScriptRuns.push('text-content')"
+  );
+  root.appendChild(trustedTextContent);
+
+  const nodeText = document.createElement("script");
+  Object.getOwnPropertyDescriptor(Node.prototype, "textContent").set.call(
+    nodeText,
+    "globalThis.__trustedScriptRuns.push('node-text')"
+  );
+  let blockedAppendThrew = false;
+  try {
+    root.appendChild(nodeText);
+  } catch (_error) {
+    blockedAppendThrew = true;
+  }
+
+  const split = document.createElement("script");
+  split.text = policy.createScript("globalThis.__trustedScriptRuns.push('split')");
+  split.firstChild.splitText(4);
+  split.normalize();
+  root.appendChild(split);
+
+  const cloneSource = document.createElement("script");
+  cloneSource.text = policy.createScript("globalThis.__trustedScriptRuns.push('clone')");
+  root.appendChild(cloneSource.cloneNode(true));
+
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createScript: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return value === "default-token"
+        ? "globalThis.__trustedScriptRuns.push('default')"
+        : null;
+    }
+  });
+  const defaulted = document.createElement("script");
+  defaulted.appendChild(document.createTextNode("default-token"));
+  root.appendChild(defaulted);
+
+  return JSON.stringify({
+    rejectedPlainText,
+    rejectedPlainInnerText,
+    rejectedPlainTextContent,
+    blockedAppendThrew,
+    runs: globalThis.__trustedScriptRuns,
+    defaultCalls
+  });
+})()
+"#,
+        )
+        .expect("script-element Trusted Types source probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"rejectedPlainText":true,"rejectedPlainInnerText":true,"rejectedPlainTextContent":true,"blockedAppendThrew":false,"runs":["trusted","inner-text","text-content","split","default"],"defaultCalls":[["default-token","TrustedScript","HTMLScriptElement text"]]}"#
+    );
+}
+
+#[test]
+fn trusted_types_default_policy_can_make_changed_empty_script_sources_executable() {
+    let mut vm = new_storage_test_vm("https://empty-script-source-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let document = vm.document_runtime.document_handle();
+    let html = vm.document_runtime.dom_host_mut().create_element("html");
+    let body = vm.document_runtime.dom_host_mut().create_element("body");
+    let html_container = vm.document_runtime.dom_host_mut().create_element("div");
+    let svg_container = vm
+        .document_runtime
+        .dom_host_mut()
+        .create_element_ns(Some("http://www.w3.org/2000/svg"), "svg")
+        .expect("SVG container should be created");
+    assert!(vm.document_runtime.dom_host_mut().set_attribute(
+        html_container,
+        "id",
+        "html-container"
+    ));
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .set_attribute(svg_container, "id", "svg-container")
+    );
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .append_child(document, html)
+    );
+    assert!(vm.document_runtime.dom_host_mut().append_child(html, body));
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .append_child(body, html_container)
+    );
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .append_child(body, svg_container)
+    );
+
+    let html_script = vm.document_runtime.dom_host_mut().create_element("script");
+    let svg_script = vm
+        .document_runtime
+        .dom_host_mut()
+        .create_element_ns(Some("http://www.w3.org/2000/svg"), "script")
+        .expect("SVG script should be created");
+    for (script, id, parent) in [
+        (html_script, "html-script", html_container),
+        (svg_script, "svg-script", svg_container),
+    ] {
+        assert!(
+            vm.document_runtime
+                .dom_host_mut()
+                .set_attribute(script, "id", id)
+        );
+        assert!(
+            vm.document_runtime
+                .dom_host_mut()
+                .set_attribute(script, "type", "unknown")
+        );
+        let text = vm.document_runtime.dom_host_mut().create_text_node(";");
+        assert!(
+            vm.document_runtime
+                .dom_host_mut()
+                .append_child(script, text)
+        );
+        assert!(
+            vm.document_runtime
+                .dom_host_mut()
+                .set_script_text_internal_slot(script, ";")
+        );
+        assert!(
+            vm.document_runtime
+                .dom_host_mut()
+                .append_child(parent, script)
+        );
+    }
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  globalThis.__emptyScriptRuns = [];
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createScript(value, type, sink) {
+      defaultCalls.push([value, type, sink]);
+      return value.length
+        ? ""
+        : `globalThis.__emptyScriptRuns.push(${JSON.stringify(sink)})`;
+    }
+  });
+
+  for (const [scriptId, containerId] of [
+    ["html-script", "html-container"],
+    ["svg-script", "svg-container"]
+  ]) {
+    const script = document.getElementById(scriptId);
+    script.remove();
+    script.removeAttribute("type");
+    script.firstChild.remove();
+    document.getElementById(containerId).appendChild(script);
+  }
+
+  document.getElementById("html-container").appendChild(
+    document.createElement("script")
+  );
+
+  return JSON.stringify({ defaultCalls, runs: globalThis.__emptyScriptRuns });
+})()
+"#,
+        )
+        .expect("changed empty script sources should be prepared and executed");
+
+    assert_eq!(
+        result,
+        r#"{"defaultCalls":[["","TrustedScript","HTMLScriptElement text"],["","TrustedScript","SVGScriptElement text"]],"runs":["HTMLScriptElement text","SVGScriptElement text"]}"#
+    );
+}
+
+#[test]
+fn trusted_types_default_policy_prepares_runtime_import_maps_before_registration() {
+    let mut vm = new_storage_test_vm("https://runtime-import-map-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.body ||
+    (document.documentElement || document.appendChild(document.createElement("html")))
+      .appendChild(document.createElement("body"));
+  const calls = [];
+  trustedTypes.createPolicy("default", {
+    createScript(value, type, sink) {
+      calls.push([value, type, sink]);
+      const specifier = sink === "SVGScriptElement text" ? "svg-mapped" : "html-mapped";
+      return JSON.stringify({ imports: { [specifier]: `/${specifier}.mjs` } });
+    }
+  });
+
+  const htmlScript = document.createElement("script");
+  htmlScript.type = "importmap";
+  htmlScript.appendChild(document.createTextNode("html-map"));
+  root.appendChild(htmlScript);
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  root.appendChild(svg);
+  const svgScript = document.createElementNS("http://www.w3.org/2000/svg", "script");
+  svgScript.setAttribute("type", "importmap");
+  svgScript.appendChild(document.createTextNode("svg-map"));
+  svg.appendChild(svgScript);
+
+  return JSON.stringify(calls);
+})()
+"#,
+        )
+        .expect("runtime import maps should pass through the Trusted Types source gate");
+
+    assert_eq!(
+        result,
+        r#"[["html-map","TrustedScript","HTMLScriptElement text"],["svg-map","TrustedScript","SVGScriptElement text"]]"#
+    );
+    let base_url = vm.document_runtime.document_url().clone();
+    for (specifier, expected) in [
+        (
+            "html-mapped",
+            "https://runtime-import-map-trusted-types.test/html-mapped.mjs",
+        ),
+        (
+            "svg-mapped",
+            "https://runtime-import-map-trusted-types.test/svg-mapped.mjs",
+        ),
+    ] {
+        assert_eq!(
+            vm.document_runtime
+                .resolve_module_specifier(specifier, &base_url)
+                .expect("default-policy import map entry should resolve")
+                .as_str(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn inline_module_graph_roots_use_trusted_types_compliant_source() {
+    let mut vm = new_storage_test_vm("https://module-source-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let document = vm.document_runtime.document_handle();
+    let html = vm.document_runtime.dom_host_mut().create_element("html");
+    let body = vm.document_runtime.dom_host_mut().create_element("body");
+    let html_script = vm.document_runtime.dom_host_mut().create_element("script");
+    let svg_script = vm
+        .document_runtime
+        .dom_host_mut()
+        .create_element_ns(Some("http://www.w3.org/2000/svg"), "script")
+        .expect("SVG script element should be created");
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .append_child(document, html)
+    );
+    assert!(vm.document_runtime.dom_host_mut().append_child(html, body));
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .append_child(body, html_script)
+    );
+    assert!(
+        vm.document_runtime
+            .dom_host_mut()
+            .append_child(body, svg_script)
+    );
+
+    let document_url = vm.document_runtime.document_url().clone();
+    let prepared = |node_id, position| PreparedScript {
+        position,
+        node_id,
+        kind: ScriptKind::Module,
+        mode: ScriptMode::ModuleInOrder,
+        source_kind: ScriptSourceKind::Inline,
+        fetch_metadata: crate::planning::ScriptFetchMetadata::default(),
+        source: ScriptSource::Inline("postMessage('original', '*');".to_owned()),
+        url: document_url.clone(),
+        base_url: document_url.clone(),
+        initiator_url: document_url.clone(),
+        host_script_handle: None,
+    };
+    let html_module = prepared(html_script, 1);
+    let svg_module = prepared(svg_script, 2);
+
+    assert_eq!(
+        vm.inline_module_script_source_for_graph_start(
+            &html_module,
+            "postMessage('blocked', '*');"
+        ),
+        crate::module_runtime::ModuleSource::text(String::new()),
+        "a module blocked by Trusted Types should enter the graph as an inert root"
+    );
+
+    vm.eval(
+        r#"
+globalThis.__inlineModuleDefaultCalls = [];
+trustedTypes.createPolicy("default", {
+  createScript(value, type, sink) {
+    globalThis.__inlineModuleDefaultCalls.push([value, type, sink]);
+    return value.replace("original", "transformed");
+  }
+});
+"#,
+    )
+    .expect("inline-module default policy should install");
+
+    let expected =
+        crate::module_runtime::ModuleSource::text("postMessage('transformed', '*');".to_owned());
+    assert_eq!(
+        vm.inline_module_script_source_for_graph_start(
+            &html_module,
+            "postMessage('original', '*');"
+        ),
+        expected.clone()
+    );
+    assert_eq!(
+        vm.inline_module_script_source_for_graph_start(
+            &svg_module,
+            "postMessage('original', '*');"
+        ),
+        expected
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__inlineModuleDefaultCalls)")
+            .expect("inline-module default-policy calls should remain observable"),
+        r#"[["postMessage('original', '*');","TrustedScript","HTMLScriptElement text"],["postMessage('original', '*');","TrustedScript","SVGScriptElement text"]]"#
+    );
+}
+
+#[test]
+fn inline_module_csp_hashes_use_prepared_source_without_duplicate_url_checks() {
+    use crate::module_runtime::NativeModuleGraphJobAdvance;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    const ORIGINAL: &str = "globalThis.__inlineModuleRuns.push('old')";
+    const PREPARED: &str = "globalThis.__inlineModuleRuns.push('new')";
+    for namespace in ["http://www.w3.org/1999/xhtml", "http://www.w3.org/2000/svg"] {
+        for runtime_owned in [false, true] {
+            for (allowed_source, report_only) in
+                [(PREPARED, false), (ORIGINAL, false), (ORIGINAL, true)]
+            {
+                let mut vm = new_storage_test_vm("https://inline-module-csp.test/page");
+                vm.eval(&format!(r#"
+                    globalThis.__inlineModuleRuns = [];
+                    globalThis.__inlineModuleCalls = [];
+                    globalThis.__inlineModuleViolations = [];
+                    addEventListener('securitypolicyviolation', event => {{
+                        __inlineModuleViolations.push([event.blockedURI, event.disposition, event.sample]);
+                    }});
+                    const root = document.appendChild(document.createElement('html'));
+                    const body = root.appendChild(document.createElement('body'));
+                    const element = document.createElementNS({namespace:?}, 'script');
+                    element.id = 'inline-module';
+                    element.setAttribute('type', 'application/json');
+                    element.appendChild(document.createTextNode({ORIGINAL:?}));
+                    body.appendChild(element);
+                    trustedTypes.createPolicy('default', {{
+                        createScript(input, type, sink) {{
+                            __inlineModuleCalls.push([input, type, sink]);
+                            return {PREPARED:?};
+                        }}
+                    }});
+                "#)).expect("install inert script and rewriting policy");
+                let hash = STANDARD.encode(
+                    moli_crypto::DigestAlgorithm::Sha256.digest_bytes(allowed_source.as_bytes()),
+                );
+                let policy = format!("script-src 'sha256-{hash}' 'report-sample'");
+                let mut enforced = vec!["require-trusted-types-for 'script'".to_owned()];
+                if report_only {
+                    vm.set_response_content_security_report_only_policies(&[policy]);
+                } else {
+                    enforced.push(policy);
+                }
+                vm.set_response_content_security_policies(&enforced);
+
+                let document_url = vm.document_runtime.document_url().clone();
+                let node_id = vm
+                    .document_runtime
+                    .get_element_by_id("inline-module")
+                    .unwrap();
+                let script = PreparedScript {
+                    position: 1,
+                    node_id,
+                    kind: ScriptKind::Module,
+                    mode: ScriptMode::ModuleInOrder,
+                    source_kind: ScriptSourceKind::Inline,
+                    fetch_metadata: crate::planning::ScriptFetchMetadata::default(),
+                    source: ScriptSource::Inline(ORIGINAL.to_owned()),
+                    url: document_url.clone(),
+                    base_url: document_url.clone(),
+                    initiator_url: document_url.clone(),
+                    host_script_handle: None,
+                };
+                let source = vm.inline_module_script_source_for_graph_start(&script, ORIGINAL);
+                let should_run = allowed_source == PREPARED || report_only;
+                assert_eq!(
+                    source.text_source(),
+                    Some(if should_run { PREPARED } else { "" })
+                );
+                let prepare_graph = if runtime_owned {
+                    crate::module_runtime::runtime_owned_loaded_module_script_graph_job
+                } else {
+                    crate::module_runtime::parser_owned_loaded_module_script_graph_job
+                };
+                let mut job = prepare_graph(
+                    &mut vm,
+                    source,
+                    &document_url,
+                    &document_url,
+                    &script.fetch_metadata,
+                    false,
+                )
+                .expect("a prepared inline module must not be checked as an external URL");
+                let NativeModuleGraphJobAdvance::Complete(graph) =
+                    job.advance_module_script_owner_lane(&mut vm).unwrap()
+                else {
+                    panic!("an import-free inline module must not fetch");
+                };
+                vm.instantiate_native_module_graph(&graph).unwrap();
+                vm.evaluate_native_module_graph(graph.root_entry).unwrap();
+                drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm);
+
+                assert_eq!(
+                    vm.eval("JSON.stringify(__inlineModuleRuns)").unwrap(),
+                    if should_run { r#"["new"]"# } else { "[]" }
+                );
+                let sink = if namespace == "http://www.w3.org/2000/svg" {
+                    "SVGScriptElement text"
+                } else {
+                    "HTMLScriptElement text"
+                };
+                assert_eq!(
+                    vm.eval("JSON.stringify(__inlineModuleCalls)").unwrap(),
+                    serde_json::json!([[ORIGINAL, "TrustedScript", sink]]).to_string()
+                );
+                let violations = if allowed_source == PREPARED {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([[
+                        "inline",
+                        if report_only { "report" } else { "enforce" },
+                        PREPARED.chars().take(40).collect::<String>()
+                    ]])
+                };
+                assert_eq!(
+                    vm.eval("JSON.stringify(__inlineModuleViolations)").unwrap(),
+                    violations.to_string()
+                );
+                // The graph consumes the prepared copy without rewriting the DOM.
+                assert_eq!(
+                    vm.document_runtime
+                        .dom_host()
+                        .text_content(node_id)
+                        .as_deref(),
+                    Some(ORIGINAL)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn script_src_enforces_trusted_script_url_and_applies_the_default_policy() {
+    let mut vm = new_storage_test_vm("https://script-src-trusted-types.test/base/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const violations = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    violations.push({
+      blockedURI: event.blockedURI,
+      effectiveDirective: event.effectiveDirective,
+      sample: event.sample
+    });
+  });
+  globalThis.__scriptSrcViolations = violations;
+
+  const rejected = document.createElement("script");
+  let plainStringRejected = false;
+  try {
+    rejected.src = "plain.js";
+  } catch (error) {
+    plainStringRejected = error instanceof TypeError;
+  }
+
+  const explicitPolicy = trustedTypes.createPolicy("script-url", {
+    createScriptURL: value => value
+  });
+  const explicit = document.createElement("script");
+  explicit.src = explicitPolicy.createScriptURL("explicit.js");
+
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createScriptURL: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return `default-${value}`;
+    }
+  });
+  const defaulted = document.createElement("script");
+  defaulted.src = "input.js";
+
+  return JSON.stringify({
+    plainStringRejected,
+    rejectedAttribute: rejected.getAttribute("src"),
+    explicitAttribute: explicit.getAttribute("src"),
+    defaultedAttribute: defaulted.getAttribute("src"),
+    defaultCalls,
+    violations
+  });
+})()
+"#,
+        )
+        .expect("HTMLScriptElement.src TrustedScriptURL sink probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"plainStringRejected":true,"rejectedAttribute":null,"explicitAttribute":"explicit.js","defaultedAttribute":"default-input.js","defaultCalls":[["input.js","TrustedScriptURL","HTMLScriptElement src"]],"violations":[]}"#
+    );
+
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        1
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__scriptSrcViolations)")
+            .expect("queued Trusted Types violation should be observable"),
+        r#"[{"blockedURI":"trusted-types-sink","effectiveDirective":"require-trusted-types-for","sample":"HTMLScriptElement src|plain.js"}]"#
+    );
+}
+
+#[test]
+fn empty_default_policy_reports_each_rejected_element_sink() {
+    let mut vm = new_storage_test_vm("https://empty-default-policy.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const samples = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    event.stopPropagation();
+    samples.push(event.sample);
+  });
+  globalThis.__emptyDefaultPolicySamples = samples;
+  trustedTypes.createPolicy("default", {});
+
+  for (const [name, property, value] of [
+    ["script", "src", "abc"],
+    ["div", "innerHTML", "abc"],
+    ["script", "text", "done"]
+  ]) {
+    try {
+      document.createElement(name)[property] = value;
+    } catch (error) {}
+  }
+  return JSON.stringify(samples);
+})()
+"#,
+        )
+        .expect("empty Trusted Types default policy probe should evaluate");
+
+    assert_eq!(result, "[]");
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        3
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__emptyDefaultPolicySamples)")
+            .expect("queued empty default policy violations should be observable"),
+        r#"["HTMLScriptElement src|abc","Element innerHTML|abc","HTMLScriptElement text|done"]"#
+    );
+}
+
+#[test]
+fn empty_default_policy_report_only_allows_and_reports_each_element_sink() {
+    let mut vm = new_storage_test_vm("https://empty-default-policy-report-only.test/");
+    vm.set_response_content_security_report_only_policies(&[
+        "require-trusted-types-for 'script'".to_owned()
+    ]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const violations = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    violations.push({ sample: event.sample, disposition: event.disposition });
+  });
+  globalThis.__emptyReportOnlyDefaultPolicyViolations = violations;
+  trustedTypes.createPolicy("default", {});
+
+  const scriptUrl = document.createElement("script");
+  scriptUrl.src = "abc";
+  const markup = document.createElement("div");
+  markup.innerHTML = "abc";
+  const scriptText = document.createElement("script");
+  scriptText.text = "done";
+
+  return JSON.stringify({
+    scriptUrl: scriptUrl.getAttribute("src"),
+    markup: markup.innerHTML,
+    scriptText: scriptText.text,
+    violations
+  });
+})()
+"#,
+        )
+        .expect("report-only empty Trusted Types default policy probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"scriptUrl":"abc","markup":"abc","scriptText":"done","violations":[]}"#
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        3
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__emptyReportOnlyDefaultPolicyViolations)")
+            .expect("queued report-only Trusted Types violations should be observable"),
+        r#"[{"sample":"HTMLScriptElement src|abc","disposition":"report"},{"sample":"Element innerHTML|abc","disposition":"report"},{"sample":"HTMLScriptElement text|done","disposition":"report"}]"#
+    );
+}
+
+#[test]
+fn report_only_trusted_types_eval_runs_reports_and_applies_the_default_policy() {
+    let mut vm = new_storage_test_vm("https://trusted-types-eval-report-only.test/");
+    vm.set_response_content_security_policies(&["script-src 'unsafe-eval'".to_owned()]);
+    vm.set_response_content_security_report_only_policies(&[
+        "require-trusted-types-for 'script'".to_owned()
+    ]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const violations = [];
+  const defaultPolicyCalls = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    if (event.blockedURI === "trusted-types-sink") {
+      violations.push({ sample: event.sample, disposition: event.disposition });
+    }
+  });
+  globalThis.__reportOnlyEvalViolations = violations;
+
+  eval("globalThis.__reportOnlyEval = 1");
+  const explicit = trustedTypes.createPolicy("explicit-report-only-eval", {
+    createScript: value => value
+  });
+  eval(explicit.createScript("globalThis.__reportOnlyEval = 2"));
+  trustedTypes.createPolicy("default", {
+    createScript: (...args) => {
+      defaultPolicyCalls.push(args);
+      return args[0];
+    }
+  });
+  eval("globalThis.__reportOnlyEval = 3");
+
+  return JSON.stringify({ value: globalThis.__reportOnlyEval, defaultPolicyCalls, violations });
+})()
+"#,
+        )
+        .expect("report-only Trusted Types eval probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"value":3,"defaultPolicyCalls":[["globalThis.__reportOnlyEval = 3","TrustedScript","eval"]],"violations":[]}"#
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        1
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__reportOnlyEvalViolations)")
+            .expect("queued report-only eval violation should be observable"),
+        r#"[{"sample":"eval|globalThis.__reportOnlyEval = 1","disposition":"report"}]"#
+    );
+}
+
+#[test]
+fn report_only_default_policy_transforms_or_preserves_by_callback_outcome() {
+    let mut vm = new_storage_test_vm("https://default-policy-report-only.test/");
+    vm.set_response_content_security_report_only_policies(&[
+        "require-trusted-types-for 'script'".to_owned()
+    ]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const violations = [];
+  const calls = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    violations.push(event.sample);
+  });
+  globalThis.__reportOnlyDefaultPolicyViolations = violations;
+
+  const policy = (value, type, sink) => {
+    calls.push([value, type, sink]);
+    if (value === "throw") throw new RangeError("default policy throw");
+    if (value === "null") return null;
+    if (value === "undefined") return undefined;
+    if (value === "typeerror") return document.missingCallback();
+    return `sanitized: ${value}`;
+  };
+  trustedTypes.createPolicy("default", {
+    createScriptURL: policy,
+    createHTML: policy,
+    createScript: policy
+  });
+
+  const cases = [
+    ["script", "src"],
+    ["div", "innerHTML"],
+    ["script", "text"]
+  ];
+  const values = {};
+  const errors = [];
+  for (const [name, property] of cases) {
+    for (const input of ["abc", "null", "undefined", "throw", "typeerror"]) {
+      const element = document.createElement(name);
+      try {
+        element[property] = input;
+        values[`${name}.${property}.${input}`] = property === "src"
+          ? element.getAttribute(property)
+          : element[property];
+      } catch (error) {
+        errors.push(`${name}.${property}.${input}:${error.name}`);
+      }
+    }
+  }
+  return JSON.stringify({ values, errors, calls, violations });
+})()
+"#,
+        )
+        .expect("report-only Trusted Types default policy outcome probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"values":{"script.src.abc":"sanitized: abc","script.src.null":"null","script.src.undefined":"undefined","div.innerHTML.abc":"sanitized: abc","div.innerHTML.null":"null","div.innerHTML.undefined":"undefined","script.text.abc":"sanitized: abc","script.text.null":"null","script.text.undefined":"undefined"},"errors":["script.src.throw:RangeError","script.src.typeerror:TypeError","div.innerHTML.throw:RangeError","div.innerHTML.typeerror:TypeError","script.text.throw:RangeError","script.text.typeerror:TypeError"],"calls":[["abc","TrustedScriptURL","HTMLScriptElement src"],["null","TrustedScriptURL","HTMLScriptElement src"],["undefined","TrustedScriptURL","HTMLScriptElement src"],["throw","TrustedScriptURL","HTMLScriptElement src"],["typeerror","TrustedScriptURL","HTMLScriptElement src"],["abc","TrustedHTML","Element innerHTML"],["null","TrustedHTML","Element innerHTML"],["undefined","TrustedHTML","Element innerHTML"],["throw","TrustedHTML","Element innerHTML"],["typeerror","TrustedHTML","Element innerHTML"],["abc","TrustedScript","HTMLScriptElement text"],["null","TrustedScript","HTMLScriptElement text"],["undefined","TrustedScript","HTMLScriptElement text"],["throw","TrustedScript","HTMLScriptElement text"],["typeerror","TrustedScript","HTMLScriptElement text"]],"violations":[]}"#
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        6
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__reportOnlyDefaultPolicyViolations)")
+            .expect("queued rejected default policy violations should be observable"),
+        r#"["HTMLScriptElement src|null","HTMLScriptElement src|undefined","Element innerHTML|null","Element innerHTML|undefined","HTMLScriptElement text|null","HTMLScriptElement text|undefined"]"#
+    );
+}
+
+#[test]
+fn rejected_default_policy_reports_both_dispositions_and_enforces_once() {
+    let mut vm = new_storage_test_vm("https://default-policy-both-dispositions.test/");
+    let policy = "require-trusted-types-for 'script'".to_owned();
+    vm.set_response_content_security_policies(std::slice::from_ref(&policy));
+    vm.set_response_content_security_report_only_policies(&[policy]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const dispositions = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    dispositions.push(event.disposition);
+  });
+  globalThis.__bothDispositionViolations = dispositions;
+  let calls = 0;
+  trustedTypes.createPolicy("default", {
+    createHTML: () => {
+      calls++;
+      return null;
+    }
+  });
+  let threw = false;
+  try {
+    document.createElement("div").innerHTML = "plain";
+  } catch (error) {
+    threw = error instanceof TypeError;
+  }
+  return JSON.stringify({ calls, threw, dispositions });
+})()
+"#,
+        )
+        .expect("combined enforce and report-only Trusted Types probe should evaluate");
+
+    assert_eq!(result, r#"{"calls":1,"threw":true,"dispositions":[]}"#);
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        2
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__bothDispositionViolations.slice().sort())")
+            .expect("both Trusted Types dispositions should be observable"),
+        r#"["enforce","report"]"#
+    );
+}
+
+#[test]
+fn eval_csp_report_samples_use_trusted_types_compliant_source() {
+    let mut vm = new_storage_test_vm("https://eval-csp-report-sample.test/");
+    vm.set_response_content_security_policies(&[
+        "require-trusted-types-for 'script'".to_owned(),
+        "script-src 'nonce-test' 'report-sample'".to_owned(),
+    ]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const samples = [];
+  const defaultCalls = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    if (event.effectiveDirective === "script-src") {
+      samples.push(event.sample);
+    }
+  });
+  globalThis.__evalCspReportSamples = samples;
+
+  const explicit = trustedTypes.createPolicy("explicit-eval", {
+    createScript: value => value
+  });
+  trustedTypes.createPolicy("default", {
+    createScript: value => {
+      defaultCalls.push(value);
+      return value;
+    }
+  });
+  const errors = [
+    () => eval(explicit.createScript("trusted-source")),
+    () => eval("default-source")
+  ].map(run => {
+    try {
+      run();
+      return "none";
+    } catch (error) {
+      return `${error.name}:${error instanceof EvalError}`;
+    }
+  });
+  return JSON.stringify({ errors, defaultCalls, samples });
+})()
+"#,
+        )
+        .expect("eval CSP report-sample probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"errors":["EvalError:true","EvalError:true"],"defaultCalls":["default-source"],"samples":[]}"#
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        2
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__evalCspReportSamples)")
+            .expect("queued eval CSP samples should be observable"),
+        r#"["trusted-source","default-source"]"#
+    );
+}
+
+#[test]
+fn function_constructor_violations_sample_only_parameters_and_body() {
+    let mut vm = new_storage_test_vm("https://function-constructor-violation.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const samples = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    if (event.blockedURI === "trusted-types-sink") {
+      samples.push(event.sample);
+    }
+  });
+  globalThis.__functionConstructorViolationSamples = samples;
+
+  const constructors = [
+    Function,
+    async function() {}.constructor,
+    function*() {}.constructor,
+    async function*() {}.constructor
+  ];
+  const errors = constructors.map(Constructor => {
+    try {
+      new Constructor(`return${";".repeat(100)}`);
+      return "none";
+    } catch (error) {
+      return `${error.name}:${error instanceof EvalError}`;
+    }
+  });
+  return JSON.stringify({ errors, samples });
+})()
+"#,
+        )
+        .expect("Function constructor violation probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"errors":["EvalError:true","EvalError:true","EvalError:true","EvalError:true"],"samples":[]}"#
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        4
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__functionConstructorViolationSamples)")
+            .expect("queued Function constructor violations should be observable"),
+        r#"["Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;","Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;","Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;","Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;"]"#
+    );
+}
+
+#[test]
+fn script_execution_violation_outside_javascript_stack_avoids_v8_frame_probe() {
+    let mut vm = new_storage_test_vm("https://script-execution-violation.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    vm.eval(
+        r#"
+(() => {
+  globalThis.__scriptExecutionViolation = null;
+  addEventListener("securitypolicyviolation", event => {
+    if (event.blockedURI === "trusted-types-sink") {
+      globalThis.__scriptExecutionViolation = {
+        blockedURI: event.blockedURI,
+        sample: event.sample
+      };
+    }
+  });
+  const script = document.createElement("script");
+  script.id = "untrusted-script-source";
+  script.type = "application/json";
+  script.appendChild(document.createTextNode("untrusted-source"));
+  const root = document.body ||
+    (document.documentElement || document.appendChild(document.createElement("html")))
+      .appendChild(document.createElement("body"));
+  root.appendChild(script);
+  return "ready";
+})()
+"#,
+    )
+    .expect("script execution violation setup should evaluate");
+
+    let script = vm
+        .document_runtime
+        .get_element_by_id("untrusted-script-source")
+        .expect("inert script should exist");
+    assert_eq!(
+        vm.inline_script_element_source_for_execution(
+            script,
+            "untrusted-source",
+            crate::content_security_policy::ContentSecurityPolicyScriptElementRequest {
+                nonce: None,
+                integrity: None,
+                parser_inserted: false,
+            },
+        ),
+        None
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        1
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__scriptExecutionViolation)")
+            .expect("script execution violation should be observable"),
+        r#"{"blockedURI":"trusted-types-sink","sample":"HTMLScriptElement text|untrusted-source"}"#
+    );
+}
+
+#[test]
+fn service_worker_register_gates_script_url_before_url_resolution() {
+    let mut vm = new_storage_test_vm("https://service-worker-register-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    vm.eval(
+            r#"
+(() => {
+  const errorName = promise => promise.then(() => 'resolved', error => error && error.name);
+  const policy = trustedTypes.createPolicy("service-worker-register", {
+    createHTML: value => value,
+    createScriptURL: value => value
+  });
+  const blockedString = errorName(navigator.serviceWorker.register("worker.js"));
+  const blockedWrongType = errorName(
+    navigator.serviceWorker.register(policy.createHTML("worker.js"))
+  );
+  const missing = errorName(navigator.serviceWorker.register());
+
+  const trustedPromise = navigator.serviceWorker.register(
+    policy.createScriptURL("http://[")
+  );
+  trustedPromise.catch(() => {});
+
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createScriptURL: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return "http://[";
+    }
+  });
+  const defaultPromise = navigator.serviceWorker.register("worker.potato");
+  defaultPromise.catch(() => {});
+
+  Promise.all([blockedString, blockedWrongType, missing]).then(([blockedString, blockedWrongType, missing]) => {
+    globalThis.serviceWorkerTrustedUrlResult = {
+      blockedString,
+      blockedWrongType,
+      missing,
+      trustedPromise: trustedPromise instanceof Promise,
+      defaultPromise: defaultPromise instanceof Promise,
+      defaultCalls
+    };
+  });
+})()
+"#,
+        )
+        .expect("ServiceWorkerContainer.register TrustedScriptURL probe should evaluate");
+
+    let result = vm
+        .eval("JSON.stringify(globalThis.serviceWorkerTrustedUrlResult)")
+        .expect("ServiceWorkerContainer.register errors should reject their Promises");
+    assert_eq!(
+        result,
+        r#"{"blockedString":"TypeError","blockedWrongType":"TypeError","missing":"TypeError","trustedPromise":true,"defaultPromise":true,"defaultCalls":[["worker.potato","TrustedScriptURL","ServiceWorkerContainer register"]]}"#
+    );
+}
+
+#[test]
+fn dom_parser_gates_converted_union_source_after_webidl_argument_conversion() {
+    let mut vm = new_storage_test_vm("https://dom-parser-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const errorName = callback => {
+    try {
+      callback();
+      return "none";
+    } catch (error) {
+      return error && error.name;
+    }
+  };
+  const parser = new DOMParser();
+  const custom = trustedTypes.createPolicy("dom-parser-custom", {
+    createHTML: value => value
+  });
+  const blocked = [
+    errorName(() => parser.parseFromString("<p>blocked</p>", "text/html")),
+    errorName(() => parser.parseFromString(null, "text/html")),
+    errorName(() => parser.parseFromString("<root/>", "application/xml"))
+  ];
+  const accepted = [
+    parser.parseFromString(
+      custom.createHTML("<main>trusted</main>"),
+      "text/html"
+    ).body.innerText,
+    parser.parseFromString(
+      custom.createHTML("<root/>"),
+      "application/xml"
+    ).documentElement.tagName
+  ];
+
+  let sourceConversions = 0;
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createHTML: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return value === "source" ? "<p>default</p>" : value;
+    }
+  });
+  const source = {
+    toString() {
+      sourceConversions += 1;
+      return "source";
+    }
+  };
+  const defaultValues = [
+    parser.parseFromString(source, "text/html").body.innerText,
+    parser.parseFromString(null, "text/html").body.innerText,
+    parser.parseFromString("<root/>", "application/xml").documentElement.tagName
+  ];
+  const callsBeforeInvalidType = defaultCalls.length;
+  const invalidType = errorName(() => parser.parseFromString(source, "TEXT/html"));
+  const invalidTypeSkippedPolicy = defaultCalls.length === callsBeforeInvalidType;
+
+  return JSON.stringify({
+    blocked,
+    accepted,
+    defaultValues,
+    sourceConversions,
+    invalidType,
+    invalidTypeSkippedPolicy,
+    symbolSource: errorName(() => parser.parseFromString(Symbol(), "text/html")),
+    defaultCalls
+  });
+})()
+"#,
+        )
+        .expect("DOMParser TrustedHTML union probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"blocked":["TypeError","TypeError","TypeError"],"accepted":["trusted","root"],"defaultValues":["default","null","root"],"sourceConversions":2,"invalidType":"TypeError","invalidTypeSkippedPolicy":true,"symbolSource":"TypeError","defaultCalls":[["source","TrustedHTML","DOMParser parseFromString"],["null","TrustedHTML","DOMParser parseFromString"],["<root/>","TrustedHTML","DOMParser parseFromString"]]}"#
+    );
+}
+
+#[test]
+fn service_worker_register_converts_options_before_the_default_policy() {
+    let mut vm = new_storage_test_vm("https://service-worker-register-options.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+    vm.eval(
+        r#"
+(async () => {
+  const sw = navigator.serviceWorker;
+  const marker = {sentinel: true};
+  const rows = [];
+  async function probe(label, callback, log) {
+    const promise = callback();
+    log.push('returned');
+    try {
+      await promise;
+      rows.push([label, 'fulfilled']);
+    } catch (error) {
+      rows.push([label, promise instanceof Promise, error === marker ? 'sentinel' : error.name, [...log]]);
+    }
+  }
+  const options = log => ({
+    get scope() { log.push('scope'); return './'; },
+    get type() { log.push('type'); return 'classic'; },
+    get updateViaCache() { log.push('cache'); return 'imports'; }
+  });
+  let log = [];
+  await probe('blocked-after-options', () => sw.register(
+    {toString() { log.push('script'); return 'worker.js'; }}, options(log)
+  ), log);
+  log = [];
+  await probe('options-exception-before-policy', () => sw.register('worker.js', {
+    get scope() { log.push('scope'); throw marker; }
+  }), log);
+  log = [];
+  await probe('script-exception', () => sw.register(
+    {toString() { log.push('script'); throw marker; }}, options(log)
+  ), log);
+  const policy = trustedTypes.createPolicy('registration-tests', {createScriptURL: v => v});
+  const trusted = policy.createScriptURL('https://[');
+  trusted.toString = () => { throw marker; };
+  log = [];
+  await probe('trusted-input', () => sw.register(trusted, options(log)), log);
+  let defaultThrows = false;
+  let policyLog = [];
+  trustedTypes.createPolicy('default', {
+    createScriptURL(value, type, sink) {
+      policyLog.push(['policy', value, type, sink]);
+      if (defaultThrows) throw marker;
+      return 'https://[';
+    }
+  });
+  log = []; policyLog = log;
+  await probe('default-after-options', () => sw.register(
+    {toString() { log.push('script'); return 'worker\ud800.js'; }}, options(log)
+  ), log);
+  log = []; policyLog = log; defaultThrows = true;
+  await probe('default-exception', () => sw.register('worker.js', options(log)), log);
+  log = []; policyLog = log;
+  await probe('invalid-options-before-default', () => sw.register('worker.js', {
+    get type() { log.push('type'); return null; }
+  }), log);
+  return rows;
+})().then(rows => { globalThis.serviceWorkerOptionsResult = rows; });
+"#,
+    )
+    .expect("ServiceWorkerContainer.register argument and policy probes should evaluate");
+    let result = vm
+        .eval("JSON.stringify(globalThis.serviceWorkerOptionsResult)")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!([
+            [
+                "blocked-after-options",
+                true,
+                "TypeError",
+                ["script", "scope", "type", "cache", "returned"]
+            ],
+            [
+                "options-exception-before-policy",
+                true,
+                "sentinel",
+                ["scope", "returned"]
+            ],
+            ["script-exception", true, "sentinel", ["script", "returned"]],
+            [
+                "trusted-input",
+                true,
+                "TypeError",
+                ["scope", "type", "cache", "returned"]
+            ],
+            [
+                "default-after-options",
+                true,
+                "TypeError",
+                [
+                    "script",
+                    "scope",
+                    "type",
+                    "cache",
+                    [
+                        "policy",
+                        "worker�.js",
+                        "TrustedScriptURL",
+                        "ServiceWorkerContainer register"
+                    ],
+                    "returned"
+                ]
+            ],
+            [
+                "default-exception",
+                true,
+                "sentinel",
+                [
+                    "scope",
+                    "type",
+                    "cache",
+                    [
+                        "policy",
+                        "worker.js",
+                        "TrustedScriptURL",
+                        "ServiceWorkerContainer register"
+                    ],
+                    "returned"
+                ]
+            ],
+            [
+                "invalid-options-before-default",
+                true,
+                "TypeError",
+                ["type", "returned"]
+            ]
+        ])
+    );
+}

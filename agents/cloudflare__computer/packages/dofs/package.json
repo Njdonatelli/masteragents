@@ -1,0 +1,43 @@
+{
+  "name": "@cloudflare/dofs",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node-storage.d.ts",
+      "default": "./dist/node-storage.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "test": "vitest run",
+    "test:workers": "vitest run --config vitest.config.workers.ts",
+    "bench": "vitest run --config vitest.config.bench.ts"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.20260616.1 || ^5.20260921.1"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/workers-types": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^4.20260616.1 || ^5.20260921.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.137.0"
+  }
+}

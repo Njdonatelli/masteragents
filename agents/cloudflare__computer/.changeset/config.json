@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
+  "changelog": ["../.github/changelog-format.mjs", { "repo": "cloudflare/computer" }],
+  "commit": false,
+  "fixed": [
+    [
+      "@cloudflare/computer",
+      "@cloudflare/dofs",
+      "@cloudflare/computer-rpc",
+      "@cloudflare/computerd"
+    ]
+  ],
+  "linked": [],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": ["@example/*", "@cloudflare/example-*"],
+  "privatePackages": {
+    "version": true,
+    "tag": false
+  }
+}

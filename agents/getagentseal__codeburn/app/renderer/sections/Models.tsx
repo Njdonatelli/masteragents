@@ -1,0 +1,412 @@
+import { useState, type ReactNode } from 'react'
+
+import { CliErrorPanel } from '../components/CliErrorPanel'
+import { EmptyNote } from '../components/EmptyState'
+import { seriesColorForModel } from '../components/ListRow'
+import { Panel } from '../components/Panel'
+import { SectionSkeleton } from '../components/Skeleton'
+import { SegTabs } from '../components/SegTabs'
+import { StaleBanner } from '../components/StaleBanner'
+import type { Section } from '../components/Sidebar'
+import { usePolled } from '../hooks/usePolled'
+import { formatCompact, formatUsd, isEstimatedCost } from '../lib/format'
+import { Usd, tokensOf } from '../components/Usd'
+import { codeburn } from '../lib/ipc'
+import { categoryFilters, modelFilters } from '../lib/investigation'
+import { reportMemoKey } from '../lib/reportMemoKey'
+import type { AuditRow, DateRange, ModelReportRow, Period } from '../lib/types'
+import { t } from '../i18n'
+import type { SettingsPane } from './Settings'
+import type { InvestigateRequest } from './Overview'
+
+type ModelsLens = 'model' | 'task' | 'audit'
+
+function fmtInt(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
+// Muted secondary tag naming a row's provider, so the same model name coming
+// from different providers reads as distinct rows.
+const providerTagStyle = { color: 'var(--mut)', fontSize: 'var(--fs-label)', fontWeight: 450 } as const
+
+export function Models({
+  period,
+  provider,
+  range = null,
+  refreshToken = 0,
+  onNavigate,
+  onInvestigate,
+  ready = true,
+}: {
+  period: Period
+  provider: string
+  range?: DateRange | null
+  refreshToken?: number
+  onNavigate?: (section: Section, pane?: SettingsPane) => void
+  onInvestigate?: (request: InvestigateRequest) => void
+  ready?: boolean
+}) {
+  const [lens, setLens] = useState<ModelsLens>('model')
+  const onAddAlias = () => onNavigate?.('settings', 'aliases')
+  const lenses = [
+    { value: 'model', label: t('models.lens.byModel') },
+    { value: 'task', label: t('models.lens.byTask') },
+    { value: 'audit', label: t('models.lens.audit') },
+  ]
+  const title = lenses.find(entry => entry.value === lens)?.label ?? ''
+  // The lens picker and the compare shortcut live in the card header's right slot.
+  const controls = (
+    <span className="panel-controls">
+      <SegTabs options={lenses} value={lens} onChange={value => setLens(value as ModelsLens)} />
+      {lens !== 'audit' && (
+        <button type="button" className="btn btn-s" onClick={() => onNavigate?.('compare')}>
+          {t('models.compareButton')}
+        </button>
+      )}
+    </span>
+  )
+
+  return (
+    <>
+      {lens === 'audit' ? (
+        <AuditLens period={period} provider={provider} range={range} refreshToken={refreshToken} ready={ready} title={title} controls={controls} />
+      ) : (
+        <ModelsUsage
+          period={period}
+          provider={provider}
+          range={range}
+          byTask={lens === 'task'}
+          refreshToken={refreshToken}
+          onAddAlias={onAddAlias}
+          onInvestigate={onInvestigate}
+          ready={ready}
+          title={title}
+          controls={controls}
+        />
+      )}
+    </>
+  )
+}
+
+function ModelsUsage({
+  period,
+  provider,
+  range,
+  byTask,
+  refreshToken,
+  onAddAlias,
+  onInvestigate,
+  ready,
+  title,
+  controls,
+}: {
+  period: Period
+  provider: string
+  range: DateRange | null
+  byTask: boolean
+  refreshToken: number
+  onAddAlias: () => void
+  onInvestigate?: (request: InvestigateRequest) => void
+  ready: boolean
+  title: ReactNode
+  controls: ReactNode
+}) {
+  const report = usePolled<ModelReportRow[]>(
+    () => range ? codeburn.getModels(period, provider, byTask, range) : codeburn.getModels(period, provider, byTask),
+    [period, provider, byTask, range?.from, range?.to, refreshToken],
+    { enabled: ready, memoKey: reportMemoKey('models', period, provider, range, String(byTask)) },
+  )
+
+  if (!report.data) {
+    if (report.error) return <CliErrorPanel error={report.error} subject={t('common.subject.modelUsage')} />
+    return <SectionSkeleton label={t('models.skeleton.scanning')} rows={5} />
+  }
+
+  return (
+    <>
+      {report.error && <StaleBanner error={report.error} />}
+      <Panel className="scroll-x" title={title} right={controls}>
+        {report.data.length ? (
+          <ModelsTable rows={report.data} byTask={byTask} onAddAlias={onAddAlias} onInvestigate={onInvestigate} />
+        ) : (
+          <EmptyNote>{t('models.empty.noUsage')}</EmptyNote>
+        )}
+      </Panel>
+    </>
+  )
+}
+
+// The audit lens checks the pricing math, not the token source: " est" marks a
+// row with no live pricing entry, or whose attributed cost diverges from a
+// straight rate x displayed-token recompute (fast-mode multipliers or the
+// 1-hour cache rate that calculateCost applies). The `~` marker in the other
+// lenses is the per-call estimated flag and is a separate signal.
+function auditEstimated(row: AuditRow): boolean {
+  if (!row.rates) return true
+  return Math.abs(row.cost.recomputedTotalUSD - row.attributedCostUSD) > 0.005
+}
+
+function AuditLens({
+  period,
+  provider,
+  range,
+  refreshToken,
+  ready,
+  title,
+  controls,
+}: {
+  period: Period
+  provider: string
+  range: DateRange | null
+  refreshToken: number
+  ready: boolean
+  title: ReactNode
+  controls: ReactNode
+}) {
+  const report = usePolled<AuditRow[]>(
+    () => range ? codeburn.getAudit(period, provider, range) : codeburn.getAudit(period, provider),
+    [period, provider, range?.from, range?.to, refreshToken],
+    { enabled: ready, memoKey: reportMemoKey('audit', period, provider, range) },
+  )
+
+  if (!report.data) {
+    if (report.error) return <CliErrorPanel error={report.error} subject={t('common.subject.tokenAudit')} />
+    return <SectionSkeleton label={t('models.skeleton.auditing')} rows={5} />
+  }
+
+  return (
+    <>
+      {report.error && <StaleBanner error={report.error} />}
+      <Panel className="scroll-x" title={title} right={controls}>
+        {report.data.length ? (
+          <AuditTable rows={report.data} />
+        ) : (
+          <EmptyNote>{t('models.empty.noAudit')}</EmptyNote>
+        )}
+      </Panel>
+    </>
+  )
+}
+
+function AuditTable({ rows }: { rows: AuditRow[] }) {
+  return (
+    <table className="audit-table">
+      <thead>
+        <tr>
+          <th>{t('models.headers.model')}</th>
+          <th>{t('models.headers.calls')}</th>
+          <th>{t('models.headers.input')}</th>
+          <th>{t('models.headers.output')}</th>
+          <th>{t('models.headers.reasoning')}</th>
+          <th>{t('models.headers.normOut')}</th>
+          <th>{t('models.headers.cacheWr')}</th>
+          <th>{t('models.headers.cacheRd')}</th>
+          <th>{t('models.headers.cost')}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, i) => (
+          <AuditTableRow key={`${row.provider}-${row.model}-${i}`} row={row} />
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function AuditTableRow({ row }: { row: AuditRow }) {
+  const estimated = auditEstimated(row)
+  return (
+    <tr>
+      <td title={row.model}>
+        <span className="mdot" style={{ display: 'inline-block', background: seriesColorForModel(row.modelDisplayName || row.model), marginRight: 8 }} />
+        {row.modelDisplayName}
+      </td>
+      <td>{fmtInt(row.calls)}</td>
+      <td>{formatCompact(row.raw.inputTokens)}</td>
+      <td>{formatCompact(row.raw.outputTokens)}</td>
+      <td>{formatCompact(row.raw.reasoningTokens)}</td>
+      <td>{formatCompact(row.displayed.outputTokens)}</td>
+      <td>{formatCompact(row.displayed.cacheWriteTokens)}</td>
+      <td>{formatCompact(row.displayed.cacheReadTokens)}</td>
+      <td>
+        {formatUsd(row.attributedCostUSD)}
+        {estimated ? <span className="est" title={t('models.audit.estimatedTitle')}>{t('models.audit.estimatedSuffix')}</span> : null}
+      </td>
+    </tr>
+  )
+}
+
+function ModelsTable({ rows, byTask, onAddAlias, onInvestigate }: {
+  rows: ModelReportRow[]
+  byTask: boolean
+  onAddAlias: () => void
+  onInvestigate?: (request: InvestigateRequest) => void
+}) {
+  if (byTask) return <ModelsByTaskTable rows={rows} onAddAlias={onAddAlias} onInvestigate={onInvestigate} />
+
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>{t('models.headers.model')}</th>
+          <th>{t('models.headers.calls')}</th>
+          <th>{t('models.headers.input')}</th>
+          <th>{t('models.headers.output')}</th>
+          <th>{t('models.headers.cacheRead')}</th>
+          <th>{t('models.headers.cost')}</th>
+          <th>{t('models.headers.saved')}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, i) => (
+          <ModelTableRow key={`${row.provider}-${row.model}-${i}`} row={row} onAddAlias={onAddAlias} onInvestigate={onInvestigate} />
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function ModelsByTaskTable({ rows, onAddAlias, onInvestigate }: {
+  rows: ModelReportRow[]
+  onAddAlias: () => void
+  onInvestigate?: (request: InvestigateRequest) => void
+}) {
+  const groups = groupTaskRows(rows)
+
+  return (
+    <table className="models-by-task">
+      <thead>
+        <tr>
+          <th>{t('models.headers.task')}</th>
+          <th>{t('models.headers.calls')}</th>
+          <th>{t('models.headers.input')}</th>
+          <th>{t('models.headers.output')}</th>
+          <th>{t('models.headers.cacheRead')}</th>
+          <th>{t('models.headers.cost')}</th>
+          <th>{t('models.headers.saved')}</th>
+        </tr>
+      </thead>
+      {groups.map(group => (
+        <tbody className="model-task-group" key={`${group.provider}-${group.model}`}>
+          <ModelGroupRow rows={group.rows} onAddAlias={onAddAlias} onInvestigate={onInvestigate} />
+          {group.rows.map((row, i) => (
+            <ModelTaskRow key={`${row.category ?? 'all'}-${i}`} row={row} onInvestigate={onInvestigate} />
+          ))}
+        </tbody>
+      ))}
+    </table>
+  )
+}
+
+function ModelTableRow({ row, onAddAlias, onInvestigate }: { row: ModelReportRow; onAddAlias: () => void; onInvestigate?: (request: InvestigateRequest) => void }) {
+  const unpriced = row.costUSD === 0 && row.savingsUSD === 0
+  const cellClass = unpriced ? 'dim' : undefined
+  // Calls and token columns are observed usage, not a pricing artifact: a
+  // model with no pricing entry still made real calls and burned real
+  // input/output/cache-read tokens, so they render at full weight. Only
+  // cost/saved collapse to dashes behind the alias affordance — there is no
+  // attributed cost to show for them.
+  const dotStyle = {
+    display: 'inline-block',
+    background: seriesColorForModel(row.modelDisplayName || row.model),
+    marginRight: 8,
+  }
+  // Contribution segments are keyed by the canonical short name, which is what
+  // modelDisplayName carries; the raw provider ids never match a segment.
+  const drillModelKeys = [row.modelDisplayName].filter(Boolean)
+
+  return (
+    <tr>
+      <td className={cellClass} title={row.model}>
+        <span className="mdot" style={dotStyle} />
+        {onInvestigate ? (
+          <button type="button" className="ov-link" title={t('models.viewSessionsFor', { name: row.modelDisplayName })} onClick={() => onInvestigate({ filters: modelFilters(drillModelKeys) })}>{row.modelDisplayName}</button>
+        ) : row.modelDisplayName}
+        {unpriced ? (
+          <>
+            {' '}
+            <button type="button" className="alias" onClick={onAddAlias}>{t('models.addAlias')}</button>
+          </>
+        ) : null}
+        <span style={{ ...providerTagStyle, display: 'block', marginTop: 2, paddingLeft: 16 }}>{row.providerDisplayName}</span>
+      </td>
+      <td>{fmtInt(row.calls)}</td>
+      <td>{formatCompact(row.inputTokens)}</td>
+      <td>{formatCompact(row.outputTokens)}</td>
+      <td>{formatCompact(row.cacheReadTokens)}</td>
+      <td className={cellClass}>{unpriced ? '—' : <Usd value={row.costUSD} tokens={tokensOf(row)} estimated={isEstimatedCost(row.costUSD, row.estimatedCostUSD)} />}</td>
+      <td className={unpriced ? 'dim' : row.savingsUSD > 0 ? 'pos' : undefined}>{unpriced ? '—' : formatUsd(row.savingsUSD)}</td>
+    </tr>
+  )
+}
+
+function ModelGroupRow({ rows, onAddAlias, onInvestigate }: { rows: ModelReportRow[]; onAddAlias: () => void; onInvestigate?: (request: InvestigateRequest) => void }) {
+  const model = rows[0]
+  const calls = rows.reduce((sum, row) => sum + row.calls, 0)
+  const costUSD = rows.reduce((sum, row) => sum + row.costUSD, 0)
+  const savingsUSD = rows.reduce((sum, row) => sum + row.savingsUSD, 0)
+  const estimatedCostUSD = rows.reduce((sum, row) => sum + (row.estimatedCostUSD ?? 0), 0)
+  const unpriced = costUSD === 0 && savingsUSD === 0
+  const drillModelKeys = [...new Set(rows.map(row => row.modelDisplayName))].filter(Boolean)
+
+  return (
+    <tr className="model-group-row">
+      <td className={unpriced ? 'dim' : undefined} title={model.model}>
+        <span className="model-group-lead">
+          <span
+            className="mdot"
+            style={{ background: seriesColorForModel(model.modelDisplayName || model.model) }}
+          />
+          <span style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            {onInvestigate ? (
+              <button type="button" className="model-group-name ov-link" title={t('models.viewSessionsFor', { name: model.modelDisplayName })} onClick={() => onInvestigate({ filters: modelFilters(drillModelKeys) })}>{model.modelDisplayName}</button>
+            ) : (
+              <span className="model-group-name">{model.modelDisplayName}</span>
+            )}
+            <span style={providerTagStyle}>{model.providerDisplayName}</span>
+          </span>
+          {unpriced ? <button type="button" className="alias" onClick={onAddAlias}>{t('models.addAlias')}</button> : null}
+        </span>
+      </td>
+      <td>{fmtInt(calls)}</td>
+      <td aria-label={t('models.aggregate.noInput')} />
+      <td aria-label={t('models.aggregate.noOutput')} />
+      <td aria-label={t('models.aggregate.noCacheRead')} />
+      <td className={unpriced ? 'dim' : undefined}>{unpriced ? '—' : <Usd value={costUSD} estimated={isEstimatedCost(costUSD, estimatedCostUSD)} />}</td>
+      <td className={unpriced ? 'dim' : savingsUSD > 0 ? 'pos' : undefined}>{unpriced ? '—' : formatUsd(savingsUSD)}</td>
+    </tr>
+  )
+}
+
+function ModelTaskRow({ row, onInvestigate }: { row: ModelReportRow; onInvestigate?: (request: InvestigateRequest) => void }) {
+  const unpriced = row.costUSD === 0 && row.savingsUSD === 0
+  const cellClass = unpriced ? 'dim' : undefined
+
+  return (
+    <tr className="model-task-row">
+      <td className={cellClass}>
+        {onInvestigate && row.category ? (
+          <button type="button" className="ov-link" title={t('models.viewCategorySessions', { category: row.category })} onClick={() => onInvestigate({ filters: categoryFilters(row.category!) })}>{row.category ?? 'general'}</button>
+        ) : row.category ?? 'general'}
+      </td>
+      <td>{fmtInt(row.calls)}</td>
+      {/* Observed usage renders even for unpriced models — see ModelTableRow. */}
+      <td>{formatCompact(row.inputTokens)}</td>
+      <td>{formatCompact(row.outputTokens)}</td>
+      <td>{formatCompact(row.cacheReadTokens)}</td>
+      <td className={cellClass}>{unpriced ? '—' : <Usd value={row.costUSD} tokens={tokensOf(row)} estimated={isEstimatedCost(row.costUSD, row.estimatedCostUSD)} />}</td>
+      <td className={unpriced ? 'dim' : row.savingsUSD > 0 ? 'pos' : undefined}>{unpriced ? '—' : formatUsd(row.savingsUSD)}</td>
+    </tr>
+  )
+}
+
+function groupTaskRows(rows: ModelReportRow[]) {
+  const groups = new Map<string, { provider: string; model: string; rows: ModelReportRow[] }>()
+  for (const row of rows) {
+    const key = `${row.provider}\u0000${row.model}`
+    const group = groups.get(key)
+    if (group) group.rows.push(row)
+    else groups.set(key, { provider: row.provider, model: row.model, rows: [row] })
+  }
+  return [...groups.values()]
+}

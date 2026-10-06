@@ -1,0 +1,1536 @@
+// @vitest-environment jsdom
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { Polled } from '../hooks/usePolled'
+import { setActiveCurrency } from '../lib/format'
+import type { OverviewHeadlineSnapshot } from '../lib/overviewSnapshot'
+import type { ActReportJson, DailyHistoryEntry, MenubarPayload, OptimizeBlock, OptimizeSnapshot, YieldJsonReport } from '../lib/types'
+import { __resetGeneration } from '../lib/generation'
+import { Overview, OverviewContent, deriveSignals, localDateKey } from './Overview'
+
+function polled(data: MenubarPayload, lastSuccessAt = Date.now()): Polled<MenubarPayload> {
+  return { data, error: null, loading: false, switching: false, lastSuccessAt, refresh: vi.fn() }
+}
+
+// Mock the typed bridge so the section fetches our payload instead of spawning
+// the CLI. `normalizeCliError` (used by usePolled) is kept from the real module.
+// `vi.hoisted` lets the hoisted `vi.mock` factory reference the spy safely.
+const { getOverview, getActReport, getYield, getOptimizeSnapshot } = vi.hoisted(() => ({
+  getOverview: vi.fn<(period: string, provider: string) => Promise<MenubarPayload>>(),
+  getActReport: vi.fn<() => Promise<ActReportJson>>(),
+  getYield: vi.fn<(period: string, provider: string) => Promise<YieldJsonReport>>(),
+  getOptimizeSnapshot: vi.fn<(...args: unknown[]) => Promise<OptimizeSnapshot>>(),
+}))
+vi.mock('../lib/ipc', async orig => {
+  const actual = await orig<typeof import('../lib/ipc')>()
+  return { ...actual, codeburn: { getOverview, getActReport, getYield, getOptimizeSnapshot } }
+})
+
+/** The on-disk daily scan the overview poll no longer carries. */
+function snapshot(optimize: OptimizeBlock, computedAt = new Date().toISOString()): OptimizeSnapshot {
+  return { scope: 'test', computedAt, appVersion: '0.0.0', optimize }
+}
+
+function makeYieldReport(): YieldJsonReport {
+  return {
+    period: { label: 'Last 30 days', start: '2026-06-12', end: '2026-07-11' },
+    summary: {
+      productive: { costUSD: 120, sessions: 3, costPercent: 80, sessionPercent: 60 },
+      reverted: { costUSD: 20, sessions: 1, costPercent: 13, sessionPercent: 20 },
+      abandoned: { costUSD: 10, sessions: 1, costPercent: 7, sessionPercent: 20 },
+      total: { costUSD: 150, sessions: 5 },
+      productiveToRevertedCostRatio: 6,
+    },
+    details: [
+      { sessionId: 's1', project: 'parser-service', category: 'productive', commitCount: 4, costUSD: 80 },
+      { sessionId: 's2', project: 'pairing-svc', category: 'productive', commitCount: 2, costUSD: 40 },
+      { sessionId: 's3', project: 'parser-service', category: 'reverted', commitCount: 0, costUSD: 20 },
+      { sessionId: 's4', project: 'scratch', category: 'abandoned', commitCount: 0, costUSD: 10 },
+    ],
+  }
+}
+
+/**
+ * A fully-typed payload anchored to `now` so today/MTD/projected are stable.
+ * `history.daily` deliberately spans 30 backfill days (the real CLI emits up to
+ * 365 regardless of period) so tests can prove period aggregation while the
+ * trend chart keeps the real last 30 entries.
+ */
+function makePayload(now: Date): MenubarPayload {
+  const DAYS = 30
+  // 30 daily entries ending today. Base $5, a clear peak ($32) and runner-up
+  // ($28), and today's entry (last) at $6.20 — the Today card's source value.
+  const daily = Array.from({ length: DAYS }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (DAYS - 1 - i))
+    let cost = 5
+    if (i === 10) cost = 32 // peak → .c.hi
+    else if (i === 20) cost = 28 // runner-up → .c.hi2
+    else if (i === DAYS - 1) cost = 6.2 // today
+    return {
+      date: localDateKey(d),
+      cost,
+      savingsUSD: 0,
+      calls: 40,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      topModels: [
+        {
+          name: 'claude-opus-4',
+          cost: cost - 1,
+          savingsUSD: 0,
+          calls: 30,
+          inputTokens: 40_000_000,
+          outputTokens: 2_000_000,
+        },
+        {
+          name: 'claude-haiku-4',
+          cost: 1,
+          savingsUSD: 0,
+          calls: 10,
+          inputTokens: 1_000,
+          outputTokens: 500,
+        },
+      ],
+    }
+  })
+
+  return {
+    generated: now.toISOString(),
+    current: {
+      label: 'Last 30 days',
+      cost: 312.4,
+      calls: 4200,
+      sessions: 88,
+      oneShotRate: 0.74,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cacheHitPercent: 63.4,
+      codexCredits: 0,
+      topActivities: [
+        { name: 'coding', cost: 92.5, savingsUSD: 7.2, turns: 120, oneShotRate: 0.8 },
+        { name: 'debugging', cost: 41.25, savingsUSD: 2.1, turns: 64, oneShotRate: null },
+      ],
+      topModels: [{ name: 'claude-opus-4', cost: 200, savingsUSD: 0, savingsBaselineModel: '', calls: 100 }],
+      localModelSavings: { totalUSD: 0, calls: 0, byModel: [], byProvider: [] },
+      providers: {},
+      topProjects: [
+        {
+          name: 'parser-service',
+          cost: 8.41,
+          savingsUSD: 0,
+          sessions: 1,
+          avgCostPerSession: 8.41,
+          sessionDetails: [
+            {
+              cost: 8.41,
+              savingsUSD: 0,
+              calls: 41,
+              inputTokens: 0,
+              outputTokens: 0,
+              date: '2026-07-08',
+              models: [{ name: 'claude-opus-4', cost: 8.41, savingsUSD: 0 }],
+            },
+          ],
+        },
+      ],
+      modelEfficiency: [],
+      topSessions: [
+        { project: 'parser-service', cost: 8.41, savingsUSD: 0, calls: 41, date: '2026-07-08' },
+        { project: 'pairing-svc', cost: 6.12, savingsUSD: 0, calls: 33, date: '2026-07-07' },
+      ],
+      retryTax: { totalUSD: 0, retries: 0, editTurns: 0, byModel: [] },
+      routingWaste: { totalSavingsUSD: 0, baselineModel: '', baselineCostPerEdit: 0, byModel: [] },
+      tools: [],
+      skills: [],
+      subagents: [],
+      mcpServers: [],
+    },
+    optimize: { findingCount: 3, savingsUSD: 23.6, topFindings: [] },
+    history: { daily },
+  }
+}
+
+function mkDay(date: string, cost: number): DailyHistoryEntry {
+  return { date, cost, savingsUSD: 0, calls: 10, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, topModels: [] }
+}
+
+/** A payload with an explicit history + current overrides for deriveSignals tests. */
+function signalsPayload(now: Date, over: {
+  current?: Partial<MenubarPayload['current']>
+  daily?: DailyHistoryEntry[]
+  optimize?: MenubarPayload['optimize']
+}): MenubarPayload {
+  const base = makePayload(now)
+  return {
+    ...base,
+    current: { ...base.current, ...over.current },
+    optimize: over.optimize ?? { findingCount: 0, savingsUSD: 0, topFindings: [] },
+    history: { daily: over.daily ?? [] },
+  }
+}
+
+/** N consecutive days ending today; `cost(i)` sets each day's spend (i = oldest→0). */
+function consecutiveDays(now: Date, count: number, cost: (index: number) => number): DailyHistoryEntry[] {
+  return Array.from({ length: count }, (_, i) => mkDay(localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (count - 1 - i))), cost(i)))
+}
+
+describe('Overview', () => {
+  beforeEach(() => {
+    setActiveCurrency({ code: 'USD', symbol: '$', rate: 1 })
+    getOverview.mockReset()
+    getActReport.mockReset()
+    getYield.mockReset()
+    getOptimizeSnapshot.mockReset()
+    getActReport.mockResolvedValue({ totals: { realizedCostUSD: 84.2, measuredActions: 11 } })
+    getYield.mockResolvedValue(makeYieldReport())
+    getOptimizeSnapshot.mockResolvedValue(snapshot({ findingCount: 0, savingsUSD: 0, topFindings: [] }))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    __resetGeneration()
+  })
+
+  it('counts the streak from yesterday when today has no spend yet', async () => {
+    const now = new Date()
+    const daily = consecutiveDays(now, 12, index => (index === 11 ? 0 : 5))
+    getOverview.mockResolvedValue({ ...makePayload(now), history: { daily } })
+
+    const { container } = render(<Overview period="30days" provider="all" />)
+
+    expect(await screen.findByText('Last 30 days')).toBeInTheDocument()
+    expect(container.querySelector('.ov-streak')).toHaveTextContent('11-day streak')
+  })
+
+  it("renders real hero, stats, model, saved, session, and daily-chart data", async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(makePayload(now))
+
+    const { container } = render(<Overview period="30days" provider="all" />)
+
+    // The hero shows the SELECTED PERIOD's total (current.cost) + label, not
+    // just today — so a 30-day view reads $312.40 under "Last 30 days".
+    expect(await screen.findByText('$312.40')).toBeInTheDocument()
+    expect(screen.getByText('Last 30 days')).toBeInTheDocument()
+    expect(container.querySelector('.ov-streak')).toHaveTextContent('30-day streak')
+
+    // The unified hero keeps spend/savings, activity, and efficiency in one
+    // divided card. Success/cache now live only in the scorecard column.
+    const kpis = screen.getByLabelText('Key performance indicators')
+    expect(within(kpis).getAllByText('74%')).toHaveLength(1)
+    expect(within(kpis).getAllByText('63%')).toHaveLength(1)
+    expect(within(kpis).getByText('$84.20')).toBeInTheDocument()
+    expect(within(kpis).getByLabelText('Efficiency grade B')).toHaveTextContent('B')
+    expect(kpis.querySelector(':scope > .ov-efficiency')).toBeInTheDocument()
+    expect(kpis.querySelector('.ov-efficiency.ov-card')).not.toBeInTheDocument()
+
+    // The contribution grid contains the real active history days, and the
+    // right rail renders real, cost-sorted activity data including one-shot.
+    const heatmap = screen.getByRole('grid', { name: 'Daily activity contribution heatmap' })
+    expect(heatmap.querySelectorAll('[data-active="true"]')).toHaveLength(30)
+    expect(screen.getByText('30 active days')).toBeInTheDocument()
+    expect(screen.getByText('coding')).toBeInTheDocument()
+    expect(screen.getByText('$92.50')).toBeInTheDocument()
+    expect(screen.getByText('120 turns')).toBeInTheDocument()
+    expect(screen.getByText('80% one-shot')).toBeInTheDocument()
+
+    // Session row title = the session's project (topSessions has no title field).
+    expect(screen.getByText('parser-service')).toBeInTheDocument()
+
+    // The selected range produces one real bar per day; today's is the accented one
+    // and the peak is called out on the value axis instead.
+    const bars = container.querySelectorAll('.chart .col')
+    expect(bars).toHaveLength(30)
+    expect(bars[29].classList.contains('hi')).toBe(true)
+    expect(container.querySelectorAll('.chart .col.hi')).toHaveLength(1)
+    expect(container.querySelector('.chart-axis-peak')).toHaveTextContent('$32.00')
+    expect(bars[29]).toHaveAttribute('data-cost', '6.2')
+    expect(bars[29]).toHaveAttribute('data-calls', '40')
+    expect(bars[29]).toHaveAttribute('data-led', 'claude-opus-4')
+    fireEvent.mouseEnter(bars[29], { clientX: 100, clientY: 80 })
+    expect(screen.getByText('claude-opus-4 led')).toBeInTheDocument()
+    expect(screen.getByText('40 calls')).toBeInTheDocument()
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip.parentElement).toBe(document.body)
+    expect(tooltip).toHaveStyle({ position: 'fixed' })
+
+    // Daily model breakdowns are summed over the selected period and sorted by
+    // cost. Token values use the same compact B/M/K notation as the menubar.
+    const modelsTable = screen.getByRole('table', { name: 'Models this period' })
+    expect(within(modelsTable).queryByRole('columnheader', { name: 'Relative cost' })).not.toBeInTheDocument()
+    const modelRows = within(modelsTable).getAllByRole('row')
+    expect(modelRows[1]).toHaveTextContent('claude-opus-4')
+    expect(modelRows[1]).toHaveTextContent('1.2B')
+    // Tokens now use the shared formatCompact helper (drops a trailing .0).
+    expect(modelRows[1]).toHaveTextContent('60M')
+    expect(modelRows[1]).toHaveTextContent('$171.20')
+    expect(modelRows[1]).toHaveTextContent('900')
+    expect(modelRows[2]).toHaveTextContent('claude-haiku-4')
+    expect(modelRows[2]).toHaveTextContent('30K')
+    expect(modelRows[2]).toHaveTextContent('15K')
+
+    // Weekly labels align to every seventh bar, and all three menubar-style
+    // daily summaries are derived from the displayed 30-day chart window.
+    const ticks = container.querySelectorAll('.ov-xax span')
+    expect(ticks).toHaveLength(5)
+    expect(ticks[0]).toHaveTextContent(new Date(
+      now.getFullYear(), now.getMonth(), now.getDate() - 29,
+    ).toLocaleString('en-US', { month: 'short', day: 'numeric' }))
+    const summaries = screen.getByLabelText('Daily spend summary')
+    expect(within(summaries).getByText('Avg/day')).toBeInTheDocument()
+    expect(within(summaries).getByText('$6.71')).toBeInTheDocument()
+    expect(within(summaries).getByText('Peak')).toBeInTheDocument()
+    // The amount is its own element (it carries the token popover); the chip
+    // still reads "$32.00 · 5/12".
+    expect(within(summaries).getByText('Peak').nextElementSibling).toHaveTextContent(/^\$32\.00 · \d{1,2}\/\d{1,2}$/)
+    expect(within(summaries).getByText('Yesterday')).toBeInTheDocument()
+    expect(within(summaries).getByText('$5.00')).toBeInTheDocument()
+
+    expect(container.querySelector('.ov-spark')).not.toBeInTheDocument()
+
+    // Scope to the KPI card (kpis, declared above): month-to-date spend can
+    // equal the saved figure on some dates, so an unscoped getByText('$84.20')
+    // would match two cards.
+    expect(within(kpis).getByText('$84.20')).toBeInTheDocument()
+    expect(within(kpis).getByText(/across 11 fixes · as of /)).toBeInTheDocument()
+    const statsRow = screen.getByText('Month to date').closest('.ov-stats3')
+    expect(statsRow?.children).toHaveLength(2)
+    expect(screen.getByText('Month to date').closest('.ov-card')).not.toBe(screen.getByText('Projected month').closest('.ov-card'))
+    expect(within(statsRow as HTMLElement).getByText('Projected month')).toBeInTheDocument()
+    expect(screen.queryByText('Nearest limit')).not.toBeInTheDocument()
+  })
+
+  it('keeps six-month and lifetime chart dates legible by capping and spreading axis ticks', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    payload.current.label = 'Lifetime'
+    payload.history.daily = consecutiveDays(now, 365, index => index + 1)
+    getOverview.mockResolvedValue(payload)
+
+    const { container } = render(<Overview period="lifetime" provider="all" />)
+
+    expect(await screen.findByText('Lifetime')).toBeInTheDocument()
+    const ticks = [...container.querySelectorAll('.ov-xax span')]
+    expect(ticks).toHaveLength(6)
+    expect(ticks[0]).toHaveTextContent(new Date(
+      now.getFullYear(), now.getMonth(), now.getDate() - 364,
+    ).toLocaleString('en-US', { month: 'short', day: 'numeric' }))
+    expect(ticks.at(-1)).toHaveTextContent(now.toLocaleString('en-US', { month: 'short', day: 'numeric' }))
+  })
+
+  it('keeps weekday labels, and month labels on one row at least three columns apart', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(makePayload(now))
+
+    const { container } = render(<Overview period="30days" provider="all" />)
+
+    expect(await screen.findByText('$312.40')).toBeInTheDocument()
+    const weekdayLabels = screen.getByLabelText('Weekday labels')
+    expect(within(weekdayLabels).getByText('Mon')).toBeInTheDocument()
+    expect(within(weekdayLabels).getByText('Wed')).toBeInTheDocument()
+    expect(within(weekdayLabels).getByText('Fri')).toBeInTheDocument()
+
+    const months = screen.getByLabelText('Month labels')
+    expect(within(months).getByText(now.toLocaleString('en-US', { month: 'short' }))).toBeInTheDocument()
+    const columns = [...months.querySelectorAll('span')]
+      .map(span => Number((span as HTMLElement).style.gridColumnStart))
+    expect(columns.length).toBeGreaterThan(1)
+    for (let index = 1; index < columns.length; index++) {
+      expect(columns[index]! - columns[index - 1]!).toBeGreaterThanOrEqual(3)
+    }
+    expect(container.querySelectorAll('.ov-heat-cell').length % 7).toBe(0)
+  })
+
+  it('renders efficiency, cost-per-outcome, and the weekday-spike risk signal', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    const today = payload.history.daily.at(-1)
+    if (!today) throw new Error('fixture must contain today')
+    today.cost = 50 // Prior same weekdays are $5, so the real detector reports 10×.
+    getOverview.mockResolvedValue(payload)
+
+    render(<Overview period="30days" provider="all" />)
+
+    expect(await screen.findByLabelText('Efficiency grade B')).toHaveTextContent('B')
+    const outcome = screen.getByText('Cost per outcome').closest('.ov-panel')
+    expect(outcome).not.toBeNull()
+    expect(within(outcome as HTMLElement).getByText('$25.00')).toBeInTheDocument()
+    expect(within(outcome as HTMLElement).getByText('$40.00')).toBeInTheDocument()
+    // The weekday-spike anomaly is absorbed into the Signals card as a risk.
+    const signals = screen.getByLabelText('Coaching signals')
+    const risks = within(signals).getByText('Risks').closest('.ov-signal-group') as HTMLElement
+    expect(within(risks).getByText(/Today's spend is 10× your typical/)).toBeInTheDocument()
+  })
+
+  it('hides the applied-fixes line when there are no realized savings', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(makePayload(now))
+    getActReport.mockResolvedValue({ totals: { realizedCostUSD: 0, measuredActions: 7 } })
+
+    render(<Overview period="30days" provider="all" />)
+
+    await waitFor(() => expect(getActReport).toHaveBeenCalled())
+    expect(screen.queryByText('Saved by applied fixes')).not.toBeInTheDocument()
+    expect(screen.queryByText(/across \d+ fix/)).not.toBeInTheDocument()
+  })
+
+  it('renders when the act report carries no totals', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(makePayload(now))
+    // A payload persisted by an older build (or any CLI that answered `{}`) is
+    // replayed from the durable report snapshot before revalidation.
+    getActReport.mockResolvedValue({} as ActReportJson)
+
+    render(<Overview period="30days" provider="all" />)
+
+    await waitFor(() => expect(getActReport).toHaveBeenCalled())
+    expect(await screen.findByText('$312.40')).toBeInTheDocument()
+    expect(screen.queryByText('Saved by applied fixes')).not.toBeInTheDocument()
+  })
+
+  it('zero-fills a contiguous 30-day window from sparse history', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    payload.history.daily = payload.history.daily.slice(-5)
+    getOverview.mockResolvedValue(payload)
+
+    // history.daily is sparse (active days only). The daily chart zero-fills a
+    // contiguous calendar window (at least 30 days) so gaps read as real
+    // calendar time instead of compressed bars — the date keys match localDateKey.
+    const { container } = render(<Overview period="week" provider="all" />)
+
+    expect(await screen.findByText('parser-service')).toBeInTheDocument()
+    const bars = container.querySelectorAll('.chart .col')
+    expect(bars).toHaveLength(30)
+    // The five real days keep their cost at the end; the leading 25 days are zeros.
+    expect([...bars].slice(-5).map(bar => bar.getAttribute('data-cost'))).toEqual(['5', '5', '5', '5', '6.2'])
+    expect([...bars].slice(0, 25).every(bar => bar.getAttribute('data-cost') === '0')).toBe(true)
+  })
+
+  it('renders days before recorded history as no data, not a $0.00 bar', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    payload.history.daily = payload.history.daily.slice(-5)
+    getOverview.mockResolvedValue(payload)
+
+    const { container } = render(<Overview period="week" provider="all" />)
+
+    expect(await screen.findByText('parser-service')).toBeInTheDocument()
+    const bars = container.querySelectorAll('.chart .col')
+    expect(bars).toHaveLength(30)
+    // The 25 leading days predate the first recorded day: no data, not zero spend.
+    expect([...bars].slice(0, 25).every(bar => bar.classList.contains('nodata'))).toBe(true)
+    expect(bars[0].getAttribute('aria-label')).toContain('no data recorded')
+    // The five recorded days stay real (idle or spend), never marked no data.
+    expect([...bars].slice(-5).some(bar => bar.classList.contains('nodata'))).toBe(false)
+
+    fireEvent.mouseEnter(bars[0], { clientX: 100, clientY: 80 })
+    expect(screen.getByText('No data recorded')).toBeInTheDocument()
+  })
+
+  it('computes month-to-date, projection, and previous-month pace', async () => {
+    const now = new Date(2026, 6, 15, 12, 0, 0) // Wed Jul 15 2026, local
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(now)
+    const payload = makePayload(now)
+    // Prepend three high-spend May days. The pace comparator must be the PREVIOUS
+    // calendar month (June) only — averaging all prior months (incl. May) would
+    // skew the % and mislabel it, which is the bug this guards.
+    const mkMay = (date: string) => ({
+      date,
+      cost: 50,
+      savingsUSD: 0,
+      calls: 40,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      topModels: [],
+    })
+    payload.history.daily = [mkMay('2026-05-10'), mkMay('2026-05-11'), mkMay('2026-05-12'), ...payload.history.daily]
+    getOverview.mockResolvedValue(payload)
+
+    render(<Overview period="30days" provider="all" />)
+
+    // MTD = sum of July daily costs = 13×$5 + $28 + $6.20 = $99.20.
+    expect(await screen.findByText('$99.20')).toBeInTheDocument()
+    // Projected = MTD + median(trailing-7 = $5) × 16 days left = $179.20.
+    expect(screen.getByText('$179.20')).toBeInTheDocument()
+    const projected = screen.getByText('Projected month').closest('.ov-card') as HTMLElement
+    expect(within(projected).getByText('$80.00')).toBeInTheDocument()
+    expect(within(projected).getByText('to go')).toBeInTheDocument()
+    // Pace compares July's daily avg (6.613) to the PREVIOUS calendar month's
+    // (June: 14×$5 + $32 = $102 / 15 = 6.8) → -3%, and the label names June.
+    // The pill carries the arrow, so the figure itself is unsigned.
+    const monthToDate = screen.getByText('Month to date').closest('.ov-card') as HTMLElement
+    expect(within(monthToDate).getByText('3%')).toBeInTheDocument()
+    expect(within(monthToDate).getByText('vs June pace')).toBeInTheDocument()
+    expect(within(monthToDate).getByText('3%').closest('.ov-stat-pill')).toHaveClass('tone-good')
+  })
+
+  it('recovers a matched session model for the sub-line without a series dot', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(makePayload(now))
+
+    const { container } = render(<Overview period="30days" provider="all" />)
+
+    // parser-service session joins topProjects sessionDetails on
+    // (project|date|calls|cost) → claude-opus-4 in the sub-line.
+    expect(await screen.findByText('Jul 8 · claude-opus-4 · 41 calls')).toBeInTheDocument()
+
+    // pairing-svc has no matching project → model omitted from sub.
+    expect(screen.getByText('Jul 7 · 33 calls')).toBeInTheDocument()
+    expect(container.querySelectorAll('.ov-sessions-widget .mdot')).toHaveLength(0)
+  })
+
+  it('uses singular call copy for a one-call expensive session', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    payload.current.topSessions = [
+      { project: 'tiny', cost: 0.02, savingsUSD: 0, calls: 1, date: '2026-07-08' },
+    ]
+    getOverview.mockResolvedValue(payload)
+
+    render(<Overview period="30days" provider="all" />)
+
+    expect(await screen.findByText('Jul 8 · 1 call')).toBeInTheDocument()
+    expect(screen.queryByText(/1 calls/)).not.toBeInTheDocument()
+  })
+
+  it('disambiguates two same-project/same-day/same-calls sessions by cost', async () => {
+    const now = new Date()
+    const base = makePayload(now)
+    // Two sessions identical on (project, date, calls) but differing in cost and
+    // model. Without cost in the join key they collide; with it they resolve.
+    const payload: MenubarPayload = {
+      ...base,
+      current: {
+        ...base.current,
+        topProjects: [
+          {
+            name: 'svc',
+            cost: 12,
+            savingsUSD: 0,
+            sessions: 2,
+            avgCostPerSession: 6,
+            sessionDetails: [
+              {
+                cost: 10,
+                savingsUSD: 0,
+                calls: 20,
+                inputTokens: 0,
+                outputTokens: 0,
+                date: '2026-07-08',
+                models: [{ name: 'claude-opus-4', cost: 10, savingsUSD: 0 }],
+              },
+              {
+                cost: 2,
+                savingsUSD: 0,
+                calls: 20,
+                inputTokens: 0,
+                outputTokens: 0,
+                date: '2026-07-08',
+                models: [{ name: 'claude-haiku-4', cost: 2, savingsUSD: 0 }],
+              },
+            ],
+          },
+        ],
+        topSessions: [
+          { project: 'svc', cost: 10, savingsUSD: 0, calls: 20, date: '2026-07-08' },
+          { project: 'svc', cost: 2, savingsUSD: 0, calls: 20, date: '2026-07-08' },
+        ],
+      },
+    }
+    getOverview.mockResolvedValue(payload)
+
+    const { container } = render(<Overview period="30days" provider="all" />)
+
+    expect(await screen.findByText('Jul 8 · claude-opus-4 · 20 calls')).toBeInTheDocument()
+    expect(screen.getByText('Jul 8 · claude-haiku-4 · 20 calls')).toBeInTheDocument()
+    expect(container.querySelectorAll('.ov-sessions-widget .mdot')).toHaveLength(0)
+  })
+
+  it('shows the first-run locate-CLI state when the binary is missing', async () => {
+    getOverview.mockRejectedValue({ kind: 'not-found', message: 'codeburn not found' })
+
+    render(<Overview period="30days" provider="all" />)
+
+    expect(await screen.findByText(/Locate the codeburn CLI/i)).toBeInTheDocument()
+  })
+
+  it('shows the Cursor sync line under the hero only for a Cursor filter', async () => {
+    const payload = makePayload(new Date())
+    payload.cursorSync = { enabled: true, state: 'error', lastSuccessAt: null, errorCode: 'login', error: 'Cursor login expired, open Cursor to sign in again' }
+    const { container, rerender } = render(<OverviewContent period="30days" provider="cursor" overview={polled(payload)} />)
+    const line = await screen.findByText('Cursor login expired, open Cursor to sign in again')
+    expect(line).toHaveClass('cursor-sync-line', 'warn')
+    expect(line.closest('.ov-hero-figures')).not.toBeNull()
+
+    rerender(<OverviewContent period="30days" provider="claude" overview={polled(payload)} />)
+    expect(container.querySelector('.cursor-sync-line')).toBeNull()
+  })
+
+  it('sources Models this period from current.topModels when a provider filter is active', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    // Provider-filtered CLI output: history.daily loses its per-model breakdown,
+    // but current is already provider-scoped.
+    payload.history.daily = payload.history.daily.map(day => ({ ...day, topModels: [] }))
+    payload.current.topModels = [
+      { name: 'gpt-5.5-codex', cost: 120, savingsUSD: 0, savingsBaselineModel: '', calls: 240 },
+      { name: 'claude-opus-4', cost: 60, savingsUSD: 0, savingsBaselineModel: '', calls: 90 },
+    ]
+
+    render(<OverviewContent period="30days" provider="codex" overview={polled(payload)} />)
+
+    const modelsTable = await screen.findByRole('table', { name: 'Models this period' })
+    const rows = within(modelsTable).getAllByRole('row')
+    // Sourced from current.topModels (cost-sorted), not the now-empty daily aggregation.
+    expect(rows[1]).toHaveTextContent('gpt-5.5-codex')
+    expect(rows[1]).toHaveTextContent('$120.00')
+    expect(rows[1]).toHaveTextContent('240')
+    expect(rows[2]).toHaveTextContent('claude-opus-4')
+    // This legacy-shaped payload carries no per-model counts → all three token
+    // cells (input, output, cache read) show a dash.
+    expect(within(rows[1] as HTMLElement).getAllByText('—')).toHaveLength(3)
+  })
+
+  it('prefers current.topModels for the models table when the payload carries per-model counts', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    // New-CLI payload: per-model counts ride on current.topModels, including
+    // cache read. history.daily still carries different (per-day, truncated)
+    // aggregates that the table must NOT fall back to.
+    payload.current.topModels = [
+      { name: 'claude-opus-4', cost: 200, savingsUSD: 0, savingsBaselineModel: '', calls: 100, inputTokens: 1_200_000, outputTokens: 340_000, cacheReadTokens: 56_000_000, cacheWriteTokens: 7_000 },
+      { name: 'claude-haiku-4', cost: 4, savingsUSD: 0, savingsBaselineModel: '', calls: 12, inputTokens: 0, outputTokens: 0, cacheReadTokens: 900, cacheWriteTokens: 0 },
+    ]
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(payload)} />)
+
+    const modelsTable = await screen.findByRole('table', { name: 'Models this period' })
+    expect(within(modelsTable).getByRole('columnheader', { name: 'Cache read' })).toBeInTheDocument()
+    const rows = within(modelsTable).getAllByRole('row')
+    // Counts come from current.topModels (1.2M in), not the daily aggregation (40M in).
+    expect(rows[1]).toHaveTextContent('claude-opus-4')
+    expect(rows[1]).toHaveTextContent('1.2M')
+    expect(rows[1]).toHaveTextContent('340K')
+    expect(rows[1]).toHaveTextContent('56M')
+    expect(within(modelsTable).queryByText('40M')).not.toBeInTheDocument()
+    // Known zeros stay zeros: haiku's fresh input/output render as 0, its cache
+    // read as the real 900.
+    expect(within(rows[2] as HTMLElement).getAllByText('0')).toHaveLength(2)
+    expect(within(rows[2] as HTMLElement).getByText('900')).toBeInTheDocument()
+  })
+
+  it('falls back to aggregating history.daily when the payload predates per-model counts', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    // Legacy all-provider payload: current.topModels has no counts, history.daily
+    // does (input/output only — the CLI never emitted per-model cache read there).
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(payload)} />)
+
+    const modelsTable = await screen.findByRole('table', { name: 'Models this period' })
+    const rows = within(modelsTable).getAllByRole('row')
+    // Input/output still come from the daily aggregation (30 days × 40M/2M) ...
+    expect(rows[1]).toHaveTextContent('claude-opus-4')
+    expect(rows[1]).toHaveTextContent('1.2B')
+    expect(rows[1]).toHaveTextContent('60M')
+    // ... and the absent per-model cache read shows as a dash, not zero.
+    expect(within(rows[1] as HTMLElement).getAllByText('—')).toHaveLength(1)
+  })
+
+  it('suppresses the week-over-week signal and MTD card for a custom range', async () => {
+    const now = new Date()
+    const overview = polled(makePayload(now))
+
+    const { rerender } = render(<OverviewContent period="30days" provider="all" overview={overview} />)
+    // Baseline (no range): the MTD card, the coach pacing line, and the
+    // week-over-week Signals entry are all present.
+    expect(await screen.findByText('Month to date')).toBeInTheDocument()
+    expect(screen.getAllByText(/than last week/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/vs last 7 days/)).toBeInTheDocument()
+
+    const from = localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2))
+    const to = localDateKey(now)
+    rerender(<OverviewContent period="30days" provider="all" range={{ from, to }} overview={overview} />)
+
+    expect(screen.queryByText('Month to date')).not.toBeInTheDocument()
+    expect(screen.queryByText('Projected month')).not.toBeInTheDocument()
+    expect(screen.queryByText(/than last week/)).toBeNull()
+    // The week-over-week Signals entry is suppressed under a custom range too.
+    expect(screen.queryByText(/vs last 7 days|vs prior 7 days/)).toBeNull()
+    expect(screen.getByText(/is the biggest driver in this range/)).toBeInTheDocument()
+  })
+
+  it('anchors the hero secondary row to the end of a custom range', async () => {
+    const now = new Date()
+    const overview = polled(makePayload(now))
+    const dayKey = (back: number) => localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - back))
+
+    const { container, rerender } = render(<OverviewContent period="30days" provider="all" overview={overview} />)
+    await screen.findByText('Month to date')
+    const foot = () => container.querySelector('.ov-hero-foot') as HTMLElement
+    // No range: the row still describes today and the day before it.
+    expect(within(foot()).getByText('Yesterday')).toBeInTheDocument()
+    expect(within(foot()).getByText('$5.17')).toBeInTheDocument()
+    expect(within(foot()).getByText('+24%')).toBeInTheDocument()
+
+    // Range ending on the $28.00 runner-up day, whose previous day is $5.00.
+    rerender(<OverviewContent period="30days" provider="all" range={{ from: dayKey(15), to: dayKey(9) }} overview={overview} />)
+    expect(within(foot()).getByText('Previous day')).toBeInTheDocument()
+    expect(within(foot()).getByText('$5.00')).toBeInTheDocument()
+    expect(within(foot()).getByText('$8.29')).toBeInTheDocument()
+    expect(within(foot()).getByText('vs previous day')).toBeInTheDocument()
+    expect(within(foot()).getByText('+460%')).toBeInTheDocument()
+  })
+
+  it('renders local-model savings in the hero only when present', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    payload.current.localModelSavings = { totalUSD: 42.5, calls: 10, byModel: [], byProvider: [] }
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(payload)} />)
+
+    expect(await screen.findByText('Saved by applied fixes')).toBeInTheDocument()
+    expect(screen.getByText('Saved via local models')).toBeInTheDocument()
+    expect(screen.getByText('$42.50')).toBeInTheDocument()
+    expect(screen.queryByText('Saved to date')).not.toBeInTheDocument()
+  })
+
+  it('shows paired-device aggregate totals in the hero under combined scope', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    // Local device: $312.40 / 4200 calls / 88 sessions (from makePayload).
+    // Combined swaps the hero to the cross-device aggregate and lists devices.
+    payload.combined = {
+      perDevice: [
+        { id: 'local', name: 'laptop', local: true, cost: 312.4, calls: 4200, sessions: 88, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0 },
+        { id: 'fp-workstation', name: 'workstation', local: false, cost: 187.6, calls: 2100, sessions: 40, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0 },
+      ],
+      combined: { cost: 500, calls: 6300, sessions: 128, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0, deviceCount: 2, reachableCount: 2 },
+    }
+
+    const { container } = render(<OverviewContent period="30days" provider="all" overview={polled(payload)} scope="combined" />)
+
+    const kpis = container.querySelector('.ov-hero-main') as HTMLElement
+    // Hero cost is the combined $500, not the local $312.40.
+    expect(within(kpis).getByText('$500.00')).toBeInTheDocument()
+    expect(within(kpis).getByText(/6,300 calls · Session count unavailable/)).toBeInTheDocument()
+    expect(within(kpis).queryByText(/128 sessions/)).not.toBeInTheDocument()
+    expect(within(kpis).queryByText(/At least/)).not.toBeInTheDocument()
+    expect(container.querySelector('.ov-panel-head h3')).toHaveTextContent('Combined · Last 30 days')
+    expect(within(kpis).getByText('2 of 2 devices')).toBeInTheDocument()
+    expect(within(kpis).getByText('workstation')).toBeInTheDocument()
+    expect(within(kpis).getByText('laptop · this device')).toBeInTheDocument()
+    // Combined mode hides the local savings lines (they are device-specific).
+    expect(within(kpis).queryByText('Saved via local models')).not.toBeInTheDocument()
+    expect(within(kpis).getByTitle('Session identities are unavailable across devices.')).toBeInTheDocument()
+  })
+
+  it('combined zero, missing basis, and replicated device counts all stay unavailable', async () => {
+    const now = new Date()
+    const cases: Array<{ name: string, combined: NonNullable<MenubarPayload['combined']> }> = [
+      {
+        name: 'zero',
+        combined: {
+          perDevice: [{ id: 'local', name: 'laptop', local: true, cost: 0, calls: 0, sessions: 0, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0 }],
+          combined: { cost: 0, calls: 0, sessions: 0, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0, deviceCount: 1, reachableCount: 1 },
+        },
+      },
+      {
+        name: 'missing-basis',
+        combined: {
+          perDevice: [{ id: 'local', name: 'laptop', local: true, cost: 10, calls: 4, sessions: 2, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0 }],
+          combined: { cost: 10, calls: 4, sessions: 2, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0, deviceCount: 1, reachableCount: 1 },
+        },
+      },
+      {
+        name: 'replicated',
+        combined: {
+          perDevice: [
+            { id: 'a', name: 'one', local: true, cost: 1, calls: 1, sessions: 1, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0 },
+            { id: 'b', name: 'two', local: false, cost: 1, calls: 1, sessions: 1, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0 },
+          ],
+          combined: { cost: 2, calls: 2, sessions: 2, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0, deviceCount: 2, reachableCount: 2 },
+        },
+      },
+    ]
+    for (const entry of cases) {
+      const payload = makePayload(now)
+      delete payload.current.sessionCountBasis
+      payload.combined = entry.combined
+      const { container, unmount } = render(<OverviewContent period="30days" provider="all" overview={polled(payload)} scope="combined" />)
+      const kpis = container.querySelector('.ov-hero-main') as HTMLElement
+      expect(within(kpis).getByText(/Session count unavailable/), entry.name).toBeInTheDocument()
+      expect(within(kpis).queryByText(/At least/), entry.name).not.toBeInTheDocument()
+      expect(within(kpis).getByTitle('Session identities are unavailable across devices.'), entry.name).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('local source-only exact zero and partial counts still work', async () => {
+    const now = new Date()
+    const zero = makePayload(now)
+    zero.current.cost = 0
+    zero.current.calls = 0
+    zero.current.sessions = 0
+    zero.current.sessionCountBasis = 'identity'
+    const { container, unmount } = render(<OverviewContent period="today" provider="all" overview={polled(zero)} scope="local" />)
+    expect(within(container.querySelector('.ov-hero-main') as HTMLElement).getByText(/0 sessions/)).toBeInTheDocument()
+    unmount()
+
+    const partial = makePayload(now)
+    partial.current.sessions = 3
+    partial.current.sessionCountBasis = 'partial'
+    render(<OverviewContent period="week" provider="all" overview={polled(partial)} scope="local" />)
+    const kpis = document.querySelector('.ov-hero-main') as HTMLElement
+    expect(within(kpis).getByText(/At least 3 sessions/)).toBeInTheDocument()
+    expect(within(kpis).getByTitle('Older session logs may be unavailable.')).toBeInTheDocument()
+  })
+
+  it('never serves the machine-wide generation as the hero under a provider filter', async () => {
+    const now = new Date()
+    const all = makePayload(now)
+    // The unfiltered payload alone carries periodTotals; the generation it
+    // leaves behind is machine-wide.
+    all.periodTotals = { '30days': { cost: 312.4, calls: 4200 } }
+    const { unmount } = render(<OverviewContent period="30days" provider="all" overview={polled(all, 2_000)} />)
+    expect(within(document.querySelector('.ov-hero-main') as HTMLElement).getByText('$312.40')).toBeInTheDocument()
+    unmount()
+
+    // Codex spent nothing: its payload carries no periodTotals, and it is older
+    // than the generation (a switch back onto a memoized filtered report).
+    const codex = makePayload(now)
+    codex.current = { ...codex.current, cost: 0, calls: 0, sessions: 0, sessionCountBasis: 'identity' }
+
+    const { container } = render(<OverviewContent period="30days" provider="codex" overview={polled(codex, 1_000)} />)
+
+    const kpis = container.querySelector('.ov-hero-main') as HTMLElement
+    expect(within(kpis).getByText('$0.00')).toBeInTheDocument()
+    expect(within(kpis).queryByText('$312.40')).not.toBeInTheDocument()
+    expect(within(kpis).getByText(/0 calls · 0 sessions/)).toBeInTheDocument()
+  })
+
+  it('keeps the hero and the models table on the generation together when it stands in for this period', async () => {
+    const now = new Date()
+    // A fresh 30days generation: its total and its models come from one pass.
+    const fresh = makePayload(now)
+    fresh.periodTotals = { '30days': { cost: 500, calls: 9000 } }
+    fresh.current = { ...fresh.current, cost: 500, calls: 9000, topModels: [
+      { name: 'gen-opus', cost: 400, savingsUSD: 0, savingsBaselineModel: '', calls: 200 },
+      { name: 'gen-haiku', cost: 100, savingsUSD: 0, savingsBaselineModel: '', calls: 50 },
+    ] }
+    const first = render(<OverviewContent period="30days" provider="all" overview={polled(fresh, 2_000)} />)
+    first.unmount()
+
+    // An older 30days payload with different numbers and models. It is itself
+    // unfiltered (carries periodTotals), so the generation gate stays open.
+    const stale = makePayload(now)
+    stale.periodTotals = { '30days': { cost: 312.4, calls: 4200 } }
+    stale.current = { ...stale.current, cost: 312.4, topModels: [
+      { name: 'stale-sonnet', cost: 312.4, savingsUSD: 0, savingsBaselineModel: '', calls: 90 },
+    ] }
+    const { container } = render(<OverviewContent period="30days" provider="all" overview={polled(stale, 1_000)} />)
+
+    // Hero shows the generation cost, and the table shows the generation's models,
+    // so the two never disagree.
+    expect(within(container.querySelector('.ov-hero-main') as HTMLElement).getByText('$500.00')).toBeInTheDocument()
+    const table = within(container.querySelector('.ov-models') as HTMLElement)
+    expect(table.getByText('gen-opus')).toBeInTheDocument()
+    expect(table.queryByText('stale-sonnet')).not.toBeInTheDocument()
+  })
+
+  it('falls back to this payload for both hero and table when the generation is from another period', async () => {
+    const now = new Date()
+    // A week generation that also carries a 30days total, but whose models are week's.
+    const week = makePayload(now)
+    week.periodTotals = { week: { cost: 90, calls: 800 }, '30days': { cost: 500, calls: 9000 } }
+    week.current = { ...week.current, cost: 90, topModels: [
+      { name: 'week-model', cost: 90, savingsUSD: 0, savingsBaselineModel: '', calls: 40 },
+    ] }
+    const first = render(<OverviewContent period="week" provider="all" overview={polled(week, 2_000)} />)
+    first.unmount()
+
+    // Switch to an older 30days payload. The generation's 30days total exists, but its
+    // models belong to week, so the hero must not show $500 with week's models.
+    const stale30 = makePayload(now)
+    stale30.periodTotals = { '30days': { cost: 312.4, calls: 4200 } }
+    stale30.current = { ...stale30.current, cost: 312.4, topModels: [
+      { name: 'thirtyday-model', cost: 312.4, savingsUSD: 0, savingsBaselineModel: '', calls: 90, inputTokens: 10, outputTokens: 5 },
+    ] }
+    const { container } = render(<OverviewContent period="30days" provider="all" overview={polled(stale30, 1_000)} />)
+
+    const kpis = within(container.querySelector('.ov-hero-main') as HTMLElement)
+    expect(kpis.getByText('$312.40')).toBeInTheDocument()
+    expect(kpis.queryByText('$500.00')).not.toBeInTheDocument()
+    const table = within(container.querySelector('.ov-models') as HTMLElement)
+    expect(table.getByText('thirtyday-model')).toBeInTheDocument()
+    expect(table.queryByText('week-model')).not.toBeInTheDocument()
+  })
+
+  it('folds a long series into weekly buckets that keep the total, the peak and their date range', async () => {
+    const now = new Date()
+    // Past 520 days the chart draws whole weeks. The biggest single day ($500)
+    // sits in a quieter week than the biggest week (7 x $85 = $595), so a chip
+    // read off days and a guide read off buckets would disagree.
+    const daily = consecutiveDays(now, 800, index => (index === 100 ? 500 : index >= 700 && index <= 706 ? 85 : 5))
+    const payload = { ...makePayload(now), history: { daily } }
+
+    const { container } = render(<OverviewContent period="lifetime" provider="all" overview={polled(payload)} />)
+
+    const bars = Array.from(container.querySelectorAll('.chart .col')) as HTMLElement[]
+    const drawn = bars.reduce((total, bar) => total + Number(bar.dataset.cost), 0)
+    expect(bars.length).toBe(Math.ceil(800 / 7))
+    expect(drawn).toBeCloseTo(daily.reduce((total, day) => total + day.cost, 0), 6)
+
+    // Header chip and chart guide read the same series.
+    expect(container.querySelector('.chart-axis-peak')).toHaveTextContent('$595.00')
+    expect(container.querySelector('.ov-chart-summaries')).toHaveTextContent('$595.00')
+    expect(container.querySelector('.ov-chart-summaries')).not.toHaveTextContent('$500.00')
+
+    // A week's sum is never presented against one date.
+    const peakBar = bars.find(bar => Number(bar.dataset.cost) === 595) as HTMLElement
+    expect(peakBar.getAttribute('aria-label')).toMatch(/^\d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2}: \$595\.00/)
+    fireEvent.mouseEnter(peakBar, { clientX: 10, clientY: 10 })
+    expect(document.querySelector('.chart-tip-d')).toHaveTextContent(' to ')
+  })
+
+  it('keeps local hero totals when scope is local even if a combined payload is present', async () => {
+    const now = new Date()
+    const payload = makePayload(now)
+    payload.combined = {
+      perDevice: [],
+      combined: { cost: 999, calls: 1, sessions: 1, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, totalTokens: 0, deviceCount: 2, reachableCount: 2 },
+    }
+
+    const { container } = render(<OverviewContent period="30days" provider="all" overview={polled(payload)} scope="local" />)
+
+    const kpis = container.querySelector('.ov-hero-main') as HTMLElement
+    expect(within(kpis).getByText('$312.40')).toBeInTheDocument()
+    expect(within(kpis).queryByText('$999.00')).not.toBeInTheDocument()
+    expect(within(kpis).queryByText(/devices/)).not.toBeInTheDocument()
+  })
+
+  it('shows a stale banner when last-good data is present but the latest poll failed', async () => {
+    const now = new Date()
+    const overview: Polled<MenubarPayload> = {
+      data: makePayload(now),
+      error: { kind: 'nonzero', message: 'codeburn exited 1' },
+      loading: false,
+      switching: false,
+      lastSuccessAt: Date.now(),
+      refresh: vi.fn(),
+    }
+
+    render(<OverviewContent period="30days" provider="all" overview={overview} />)
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Refresh failed, showing last good data · codeburn exited 1')
+  })
+
+  it('groups current-driven signals into wins and improvements', () => {
+    const now = new Date()
+    const wins = deriveSignals(signalsPayload(now, {
+      current: {
+        cacheHitPercent: 85,
+        oneShotRate: 0.82,
+        localModelSavings: { totalUSD: 15, calls: 4, byModel: [], byProvider: [] },
+      },
+      optimize: {
+        findingCount: 2,
+        savingsUSD: 30,
+        topFindings: [
+          { title: 'Trim CLAUDE.md preamble', impact: 'high', savingsUSD: 12 },
+          { title: 'Route trivial edits to Haiku', impact: 'medium', savingsUSD: 8 },
+        ],
+      },
+    }), now, false, {
+      topFindings: [
+        { title: 'Trim CLAUDE.md preamble', impact: 'high', savingsUSD: 12 },
+        { title: 'Route trivial edits to Haiku', impact: 'medium', savingsUSD: 8 },
+      ],
+    })
+    expect(wins.wins.map(s => s.text)).toEqual([
+      'Cache hit at 85%, most prompts reuse cache',
+      '82% one-shot, edits land first try',
+      '$15.00 saved via local models',
+    ])
+    expect(wins.improvements).toEqual([
+      { text: 'Trim CLAUDE.md preamble', trailing: '$12.00' },
+      { text: 'Route trivial edits to Haiku', trailing: '$8.00' },
+    ])
+    expect(wins.risks).toEqual([])
+  })
+
+  it('flags low cache-hit, low one-shot, and heavy retry tax as improvements', () => {
+    const now = new Date()
+    const { improvements } = deriveSignals(signalsPayload(now, {
+      current: {
+        cacheHitPercent: 40,
+        oneShotRate: 0.4,
+        cost: 100,
+        retryTax: { totalUSD: 30, retries: 5, editTurns: 10, byModel: [] },
+      },
+    }), now, false)
+    expect(improvements.map(s => s.text)).toEqual([
+      'Cache hit only 40%, paying for cold prompts',
+      '40% one-shot, lots of iteration',
+      'Retry tax is 30% of spend',
+    ])
+  })
+
+  it('does not treat a zero cache-hit (no data) as a cold-prompt improvement', () => {
+    const now = new Date()
+    const { improvements } = deriveSignals(signalsPayload(now, {
+      current: { cacheHitPercent: 0, oneShotRate: 0.6 },
+    }), now, false)
+    expect(improvements).toEqual([])
+  })
+
+  it('derives streak and a week-over-week drop as wins from history', () => {
+    const now = new Date()
+    // 14 consecutive active days; prior 7 at $20, recent 7 at $5 → spend down 75%.
+    const daily = consecutiveDays(now, 14, i => (i < 7 ? 20 : 5))
+    const { wins } = deriveSignals(signalsPayload(now, {
+      current: { cacheHitPercent: 60, oneShotRate: 0.6 },
+      daily,
+    }), now, false)
+    expect(wins.map(s => s.text)).toEqual([
+      'Spend down 75% vs last 7 days',
+      '14-day usage streak',
+    ])
+  })
+
+  it('reports weekday spike, week-over-week rise, and month overrun as risks', () => {
+    const now = new Date(2026, 6, 15) // Jul 15 2026
+    // June total = $5 (prior-month baseline); July: prior 7 low, recent 7 high.
+    const daily = [mkDay('2026-06-11', 5), ...consecutiveDays(now, 14, i => (i < 7 ? 2 : 20))]
+    const { risks } = deriveSignals(signalsPayload(now, {
+      current: { cacheHitPercent: 60, oneShotRate: 0.6 },
+      daily,
+    }), now, false)
+    expect(risks).toHaveLength(3)
+    expect(risks[0].text).toMatch(/Today's spend is 10× your typical/)
+    expect(risks[1].text).toBe('Spend up 900% vs prior 7 days')
+    expect(risks[2].text).toMatch(/^On pace for .* this month, \+\d+% vs last$/)
+  })
+
+  it('suppresses week-over-week and projection risks under a custom range, keeping the weekday spike', () => {
+    const now = new Date(2026, 6, 15)
+    const daily = [mkDay('2026-06-11', 5), ...consecutiveDays(now, 14, i => (i < 7 ? 2 : 20))]
+    const payload = signalsPayload(now, { current: { cacheHitPercent: 60, oneShotRate: 0.6 }, daily })
+    const { risks } = deriveSignals(payload, now, true)
+    expect(risks).toHaveLength(1)
+    expect(risks[0].text).toMatch(/Today's spend is 10× your typical/)
+  })
+
+  it('caps each group at three signals', () => {
+    const now = new Date()
+    // Five wins would qualify (cache, one-shot, week-down, streak, local); cap keeps 3.
+    const daily = consecutiveDays(now, 14, i => (i < 7 ? 20 : 5))
+    const { wins } = deriveSignals(signalsPayload(now, {
+      current: {
+        cacheHitPercent: 85,
+        oneShotRate: 0.82,
+        localModelSavings: { totalUSD: 15, calls: 4, byModel: [], byProvider: [] },
+      },
+      daily,
+    }), now, false)
+    expect(wins).toHaveLength(3)
+    expect(wins.map(s => s.text)).toEqual([
+      'Cache hit at 85%, most prompts reuse cache',
+      '82% one-shot, edits land first try',
+      'Spend down 75% vs last 7 days',
+    ])
+  })
+
+  it('renders the three-column Signals card with optimize findings under Improvements', async () => {
+    const now = new Date()
+    const payload = signalsPayload(now, {
+      current: {
+        cacheHitPercent: 85,
+        oneShotRate: 0.82,
+        localModelSavings: { totalUSD: 15, calls: 4, byModel: [], byProvider: [] },
+      },
+    })
+    getOptimizeSnapshot.mockResolvedValue(snapshot({
+      findingCount: 1,
+      savingsUSD: 12,
+      topFindings: [{ title: 'Trim CLAUDE.md preamble', impact: 'high', savingsUSD: 12 }],
+    }))
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(payload)} />)
+
+    const signals = await screen.findByLabelText('Coaching signals')
+    const wins = within(signals).getByText('Wins').closest('.ov-signal-group') as HTMLElement
+    expect(within(wins).getByText(/Cache hit at 85%/)).toBeInTheDocument()
+    // The findings arrive from the stored daily scan, one tick behind the poll.
+    const improvements = (await within(signals).findByText('Improvements')).closest('.ov-signal-group') as HTMLElement
+    expect(within(improvements).getByText('Trim CLAUDE.md preamble')).toBeInTheDocument()
+    expect(within(improvements).getByText('$12.00')).toBeInTheDocument()
+  })
+
+  it('renders no Signals card when every group is empty', async () => {
+    const now = new Date()
+    const payload = signalsPayload(now, {
+      current: { cacheHitPercent: 60, oneShotRate: 0.6 },
+      daily: [],
+      optimize: { findingCount: 0, savingsUSD: 0, topFindings: [] },
+    })
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(payload)} />)
+
+    expect(await screen.findByText('Daily spend')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Coaching signals')).not.toBeInTheDocument()
+  })
+
+  it('renders section costs in the active non-USD currency (rate applied once, symbol swapped)', async () => {
+    setActiveCurrency({ code: 'EUR', symbol: '€', rate: 0.9 })
+    const now = new Date()
+    getOverview.mockResolvedValue(makePayload(now))
+
+    render(<Overview period="30days" provider="all" />)
+
+    // Cost per outcome sources raw-USD yield values: $/commit = 150/6 = 25 → €22.50,
+    // $/productive session = 120/3 = 40 → €36.00 (rate applied exactly once).
+    const outcome = (await screen.findByText('Cost per outcome')).closest('.ov-panel') as HTMLElement
+    expect(within(outcome).getByText('€22.50')).toBeInTheDocument()
+    expect(within(outcome).getByText('€36.00')).toBeInTheDocument()
+  })
+
+  it('formats a persisted headline in its own currency on first paint and dates older snapshots', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 7, 28, 10, 0, 0))
+    setActiveCurrency({ code: 'USD', symbol: '$', rate: 1 })
+    const captured = new Date(2026, 7, 26, 14, 30, 0)
+    const snapshot: OverviewHeadlineSnapshot = {
+      version: 2,
+      key: 'all|30days',
+      capturedAt: captured.getTime(),
+      generated: captured.toISOString(),
+      label: 'Last 30 days',
+      cost: 100,
+      calls: 12,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      currency: { code: 'EUR', symbol: '€', rate: 0.9 },
+    }
+    const loading: Polled<MenubarPayload> = {
+      data: null,
+      error: null,
+      loading: true,
+      switching: false,
+      lastSuccessAt: null,
+      refresh: vi.fn(),
+    }
+
+    render(<OverviewContent period="30days" provider="all" overview={loading} headlineSnapshot={snapshot} />)
+
+    expect(screen.getByText('€90.00')).toBeInTheDocument()
+    expect(screen.getByText('exact Aug 26 at 2:30 PM')).toBeInTheDocument()
+  })
+
+  it('suppresses only the persisted-headline handoff, not later filter animations', () => {
+    const now = new Date(2026, 7, 28, 10, 0, 0)
+    const payload = makePayload(now)
+    const snapshot: OverviewHeadlineSnapshot = {
+      version: 2,
+      key: 'all|30days',
+      capturedAt: now.getTime(),
+      generated: now.toISOString(),
+      label: 'Last 30 days',
+      cost: payload.current.cost,
+      calls: payload.current.calls,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      currency: { code: 'USD', symbol: '$', rate: 1 },
+    }
+    const loading: Polled<MenubarPayload> = {
+      data: null,
+      error: null,
+      loading: true,
+      switching: false,
+      lastSuccessAt: null,
+      refresh: vi.fn(),
+    }
+    const { container, rerender } = render(
+      <OverviewContent period="30days" provider="all" overview={loading} headlineSnapshot={snapshot} />,
+    )
+
+    rerender(<OverviewContent period="30days" provider="all" overview={polled(payload)} headlineSnapshot={snapshot} />)
+    expect(container.querySelector('[data-countup-animation]')).toHaveAttribute('data-countup-animation', 'suppressed')
+
+    rerender(<OverviewContent period="week" provider="all" overview={polled(payload)} headlineSnapshot={snapshot} />)
+    expect(container.querySelector('[data-countup-animation]')).toHaveAttribute('data-countup-animation', 'enabled')
+  })
+})
+
+type WorkflowOverrides = {
+  workflow?: MenubarPayload['current']['workflow']
+  topReworkedFiles?: MenubarPayload['current']['topReworkedFiles']
+  pricingCoverage?: MenubarPayload['current']['pricingCoverage']
+}
+
+function workflowPayload(now: Date, over: WorkflowOverrides): MenubarPayload {
+  const base = makePayload(now)
+  return { ...base, current: { ...base.current, ...over } }
+}
+
+describe('Overview workflow card', () => {
+  beforeEach(() => {
+    setActiveCurrency({ code: 'USD', symbol: '$', rate: 1 })
+    getOverview.mockReset()
+    getActReport.mockReset()
+    getYield.mockReset()
+    getActReport.mockResolvedValue({ totals: { realizedCostUSD: 0, measuredActions: 0 } })
+    getYield.mockResolvedValue(makeYieldReport())
+  })
+  afterEach(() => vi.useRealTimers())
+
+  function workflowRegion(): HTMLElement {
+    return screen.getByRole('heading', { name: 'Workflow' }).closest('.ov-workflow-widget') as HTMLElement
+  }
+
+  it('renders correction rate, time to first edit, top rework, coverage chip, and a coaching note', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(workflowPayload(now, {
+      workflow: { corrections: 7, correctionRate: 0.2, medianTimeToFirstEditMs: 45_000 },
+      topReworkedFiles: [{ path: 'parser.ts', sessions: 4, edits: 12 }],
+      pricingCoverage: 0.92,
+    }))
+
+    render(<Overview period="30days" provider="all" />)
+
+    const card = await waitFor(() => workflowRegion())
+    expect(within(card).getByText('Correction rate')).toBeInTheDocument()
+    expect(within(card).getByText('20%')).toBeInTheDocument()
+    expect(within(card).getByText('7 corrections')).toBeInTheDocument()
+    expect(within(card).getByText('Time to first edit')).toBeInTheDocument()
+    // Under 60s renders as seconds, not minutes.
+    expect(within(card).getByText('45s')).toBeInTheDocument()
+    expect(within(card).getByText(/Top rework:/)).toHaveTextContent('Top rework: parser.ts · 4 sessions · 12 edits')
+    // pricingCoverage 0.92 → a "92% priced" caveat chip.
+    expect(within(card).getByText('92% priced')).toBeInTheDocument()
+    // Corrections clears its bar first, so its coaching line wins.
+    expect(within(card).getByText(/You corrected the assistant on 20% of prompts \(7 times\)/)).toBeInTheDocument()
+  })
+
+  it('does not render at all when the payload carries no workflow signal', async () => {
+    const now = new Date()
+    // makePayload omits workflow/topReworkedFiles/pricingCoverage entirely.
+    getOverview.mockResolvedValue(makePayload(now))
+
+    render(<Overview period="30days" provider="all" />)
+
+    await screen.findByText('$312.40')
+    expect(screen.queryByRole('heading', { name: 'Workflow' })).not.toBeInTheDocument()
+  })
+
+  it('stays hidden when workflow exists but every metric is empty', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(workflowPayload(now, {
+      workflow: { corrections: 0, correctionRate: null, medianTimeToFirstEditMs: null },
+      topReworkedFiles: [],
+      pricingCoverage: 1,
+    }))
+
+    render(<Overview period="30days" provider="all" />)
+
+    await screen.findByText('$312.40')
+    expect(screen.queryByRole('heading', { name: 'Workflow' })).not.toBeInTheDocument()
+  })
+
+  it('picks the churn note and formats minutes when corrections are below the bar', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(workflowPayload(now, {
+      workflow: { corrections: 1, correctionRate: 0.05, medianTimeToFirstEditMs: 8 * 60 * 1000 },
+      topReworkedFiles: [{ path: 'router.ts', sessions: 5, edits: 30 }],
+      pricingCoverage: null,
+    }))
+
+    render(<Overview period="30days" provider="all" />)
+
+    const card = await waitFor(() => workflowRegion())
+    // >= 60s renders as whole minutes.
+    expect(within(card).getByText('8m')).toBeInTheDocument()
+    // Corrections (5%) is below 0.15, so the churn note wins over TTFE.
+    expect(within(card).getByText(/router\.ts was reworked across 5 sessions \(30 edits\)/)).toBeInTheDocument()
+    // pricingCoverage null → no chip.
+    expect(within(card).queryByText(/priced/)).not.toBeInTheDocument()
+  })
+
+  it('falls back to a neutral caption and hides the chip at full coverage when no note fires', async () => {
+    const now = new Date()
+    getOverview.mockResolvedValue(workflowPayload(now, {
+      workflow: { corrections: 1, correctionRate: 0.05, medianTimeToFirstEditMs: 30_000 },
+      topReworkedFiles: [{ path: 'small.ts', sessions: 1, edits: 2 }],
+      pricingCoverage: 1,
+    }))
+
+    render(<Overview period="30days" provider="all" />)
+
+    const card = await waitFor(() => workflowRegion())
+    expect(within(card).getByText('Corrections, first-edit latency, and file churn across your sessions.')).toBeInTheDocument()
+    expect(within(card).queryByText(/priced/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Overview refresh tiers', () => {
+  beforeEach(() => {
+    setActiveCurrency({ code: 'USD', symbol: '$', rate: 1 })
+    getOverview.mockReset()
+    getActReport.mockReset().mockResolvedValue({ totals: { realizedCostUSD: 84.2, measuredActions: 11 } })
+    getYield.mockReset().mockResolvedValue(makeYieldReport())
+    getOptimizeSnapshot.mockReset()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    __resetGeneration()
+  })
+
+  it('shows the stored savings with its age, never as a live figure', async () => {
+    // Mid-day, so a stamp a few hours back is still today and shows as a bare time.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 8, 24, 12, 0, 0))
+    const computedAt = new Date(Date.now() - 90 * 60_000)
+    getOptimizeSnapshot.mockResolvedValue(snapshot(
+      { findingCount: 4, savingsUSD: 31.5, topFindings: [] },
+      computedAt.toISOString(),
+    ))
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(makePayload(new Date()))} />)
+
+    const coach = (await screen.findByText('$31.50')).closest('.ov-coach') as HTMLElement
+    const time = computedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    expect(within(coach).getByText(`(as of ${time})`)).toBeInTheDocument()
+  })
+
+  it('omits the savings clause entirely until a scan exists, rather than showing $0.00', async () => {
+    getOptimizeSnapshot.mockRejectedValue({ kind: 'nonzero', message: 'no scan yet' })
+
+    const { container } = render(<OverviewContent period="30days" provider="all" overview={polled(makePayload(new Date()))} />)
+
+    const coach = await waitFor(() => container.querySelector('.ov-coach') as HTMLElement)
+    expect(within(coach).queryByText(/is recoverable/)).not.toBeInTheDocument()
+    expect(within(coach).queryByText('$0.00')).not.toBeInTheDocument()
+  })
+
+  it('never carries one period stored savings into another', async () => {
+    getOptimizeSnapshot.mockResolvedValue(snapshot({ findingCount: 1, savingsUSD: 31.5, topFindings: [] }))
+    const overview = polled(makePayload(new Date()))
+    const { rerender } = render(<OverviewContent period="30days" provider="all" overview={overview} />)
+    await screen.findByText('$31.50')
+
+    // A period switch re-asks for THAT period's scan; the previous figure is
+    // gone the moment the scope changes, not after the new one arrives.
+    let release: (value: OptimizeSnapshot) => void = () => {}
+    getOptimizeSnapshot.mockImplementation(() => new Promise<OptimizeSnapshot>(resolve => { release = resolve }))
+    rerender(<OverviewContent period="week" provider="all" overview={overview} />)
+    await waitFor(() => expect(screen.queryByText('$31.50')).not.toBeInTheDocument())
+
+    await act(async () => { release(snapshot({ findingCount: 1, savingsUSD: 4.25, topFindings: [] })) })
+    expect(await screen.findByText('$4.25')).toBeInTheDocument()
+  })
+
+  it('re-asks act, yield and the scan on a manual refresh, and forces a fresh scan', async () => {
+    getOptimizeSnapshot.mockResolvedValue(snapshot({ findingCount: 1, savingsUSD: 2, topFindings: [] }))
+    const overview = polled(makePayload(new Date()))
+    const { rerender } = render(<OverviewContent period="30days" provider="all" overview={overview} refreshToken={0} />)
+    await waitFor(() => expect(getOptimizeSnapshot).toHaveBeenCalledTimes(1))
+    // The first read may serve a cached scan (no forced maxAge).
+    expect(getOptimizeSnapshot.mock.calls[0]![5]).toBeUndefined()
+    const actCalls = getActReport.mock.calls.length
+    const yieldCalls = getYield.mock.calls.length
+
+    rerender(<OverviewContent period="30days" provider="all" overview={overview} refreshToken={1} />)
+
+    await waitFor(() => expect(getOptimizeSnapshot).toHaveBeenCalledTimes(2))
+    expect(getOptimizeSnapshot.mock.calls[1]![5]).toBe(0) // forced recompute
+    expect(getActReport.mock.calls.length).toBe(actCalls + 1)
+    expect(getYield.mock.calls.length).toBe(yieldCalls + 1)
+  })
+
+  it('does not re-ask act or yield on live cadence ticks', async () => {
+    vi.useFakeTimers()
+    // Mid-day: a local midnight inside these ten minutes is a real reason to re-ask.
+    vi.setSystemTime(new Date(2026, 8, 24, 12, 0, 0))
+    try {
+      getOptimizeSnapshot.mockResolvedValue(snapshot({ findingCount: 0, savingsUSD: 0, topFindings: [] }))
+      render(<OverviewContent period="30days" provider="all" overview={polled(makePayload(new Date()))} />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const actCalls = getActReport.mock.calls.length
+      const yieldCalls = getYield.mock.calls.length
+      expect(actCalls).toBe(1)
+      expect(yieldCalls).toBe(1)
+
+      // Four minutes of live ticks (the default 60s cadence) move neither, and
+      // the daily scan is never on a timer at all.
+      await act(async () => { await vi.advanceTimersByTimeAsync(4 * 60_000) })
+      expect(getActReport.mock.calls.length).toBe(actCalls)
+      expect(getYield.mock.calls.length).toBe(yieldCalls)
+      expect(getOptimizeSnapshot).toHaveBeenCalledTimes(1)
+
+      // Yield's own 5-minute tier comes due; act's 10-minute one does not.
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      expect(getYield.mock.calls.length).toBe(yieldCalls + 1)
+      expect(getActReport.mock.calls.length).toBe(actCalls)
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000) })
+      expect(getActReport.mock.calls.length).toBe(actCalls + 1)
+      expect(getOptimizeSnapshot).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('Overview stored-figure honesty', () => {
+  beforeEach(() => {
+    setActiveCurrency({ code: 'USD', symbol: '$', rate: 1 })
+    getOverview.mockReset()
+    getActReport.mockReset().mockResolvedValue({ totals: { realizedCostUSD: 0, measuredActions: 0 } })
+    getYield.mockReset().mockResolvedValue(makeYieldReport())
+    getOptimizeSnapshot.mockReset().mockResolvedValue(snapshot({ findingCount: 0, savingsUSD: 0, topFindings: [] }))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    __resetGeneration()
+  })
+
+  it('dates the stored findings that sit beside live signals in the Signals card', async () => {
+    // Mid-day, so a stamp a few hours back is still today and shows as a bare time.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 8, 24, 12, 0, 0))
+    const now = new Date()
+    const computedAt = new Date(Date.now() - 3 * 60 * 60_000)
+    getOptimizeSnapshot.mockResolvedValue(snapshot(
+      { findingCount: 1, savingsUSD: 12, topFindings: [{ title: 'Trim CLAUDE.md preamble', impact: 'high', savingsUSD: 12 }] },
+      computedAt.toISOString(),
+    ))
+    const payload = signalsPayload(now, {
+      current: { cacheHitPercent: 85, oneShotRate: 0.82 },
+    })
+
+    render(<OverviewContent period="30days" provider="all" overview={polled(payload)} />)
+
+    const signals = await screen.findByLabelText('Coaching signals')
+    const improvements = (await within(signals).findByText('Improvements')).closest('.ov-signal-group') as HTMLElement
+    const row = within(improvements).getByText('Trim CLAUDE.md preamble').closest('.ov-signal') as HTMLElement
+    const time = computedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    expect(within(row).getByText(`as of ${time}`)).toBeInTheDocument()
+
+    // The live rows in the same card carry no age: they came from this poll.
+    const wins = within(signals).getByText('Wins').closest('.ov-signal-group') as HTMLElement
+    const liveRow = within(wins).getByText(/Cache hit at 85%/).closest('.ov-signal') as HTMLElement
+    expect(liveRow.querySelector('.ov-signal-age')).toBeNull()
+  })
+
+  it('dates the cold-boot headline by when THIS app verified it, not the payload generated stamp', async () => {
+    // The poll takes the CLI status snapshot path, so `generated` can be a day
+    // older than the moment these numbers were confirmed.
+    const capturedAt = new Date()
+    capturedAt.setHours(9, 15, 0, 0)
+    const cold: Polled<MenubarPayload> = { data: null, error: null, loading: true, switching: false, lastSuccessAt: null, refresh: vi.fn() }
+
+    render(<OverviewContent period="30days" provider="all" overview={cold} headlineSnapshot={{
+      version: 2,
+      key: 'k',
+      capturedAt: capturedAt.getTime(),
+      generated: new Date(capturedAt.getTime() - 26 * 60 * 60_000).toISOString(),
+      label: 'Last 30 days',
+      cost: 42,
+      calls: 10,
+      inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheWriteTokens: 1,
+    }} />)
+
+    const head = await screen.findByText(/^exact /)
+    const time = capturedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    expect(head).toHaveTextContent(`exact at ${time}`)
+  })
+})
+
+describe('Overview across local midnight', () => {
+  beforeEach(() => {
+    setActiveCurrency({ code: 'USD', symbol: '$', rate: 1 })
+    getOverview.mockReset()
+    getActReport.mockReset().mockResolvedValue({ totals: { realizedCostUSD: 0, measuredActions: 0 } })
+    getYield.mockReset().mockResolvedValue(makeYieldReport())
+    getOptimizeSnapshot.mockReset()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    __resetGeneration()
+  })
+
+  // An app left open past midnight must re-ask: every period the scan is
+  // computed for is anchored to the local day, so yesterday's figure would
+  // otherwise sit under "Today" until a remount or a manual refresh. Main's
+  // same-day rule only helps once something asks.
+  it('re-asks for the scan once on the first render of a new local day', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date(2026, 8, 18, 23, 58, 0))
+      const yesterday = snapshot(
+        { findingCount: 2, savingsUSD: 31.5, topFindings: [] },
+        new Date(2026, 8, 18, 23, 58, 0).toISOString(),
+      )
+      getOptimizeSnapshot.mockResolvedValue(yesterday)
+      const overview = polled(makePayload(new Date()))
+      const view = () => <OverviewContent period="today" provider="all" overview={overview} />
+
+      const { container, rerender } = render(view())
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const coach = () => container.querySelector('.ov-coach') as HTMLElement
+      expect(getOptimizeSnapshot).toHaveBeenCalledTimes(1)
+      expect(within(coach()).getByText('$31.50')).toBeInTheDocument()
+
+      // 23:59 — a live headline tick re-renders the tree. Same local day, so
+      // nothing is re-asked and the figure on screen never blinks.
+      vi.setSystemTime(new Date(2026, 8, 18, 23, 59, 0))
+      await act(async () => { rerender(view()) })
+      expect(within(coach()).getByText('$31.50')).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(getOptimizeSnapshot).toHaveBeenCalledTimes(1)
+      expect(within(coach()).getByText('$31.50')).toBeInTheDocument()
+
+      // 00:01 — the day flipped. Exactly one new request, and NOT a forced one:
+      // the stored row is simply from another day, which main decides.
+      vi.setSystemTime(new Date(2026, 8, 19, 0, 1, 0))
+      let release: (value: OptimizeSnapshot) => void = () => {}
+      getOptimizeSnapshot.mockImplementation(() => new Promise<OptimizeSnapshot>(resolve => { release = resolve }))
+      await act(async () => { rerender(view()) })
+      // Yesterday's figure is dropped the moment the day changes, the same way
+      // a period switch behaves — it is never painted as today's.
+      expect(within(coach()).queryByText('$31.50')).not.toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(getOptimizeSnapshot).toHaveBeenCalledTimes(2)
+      expect(getOptimizeSnapshot.mock.calls[1]![5]).toBeUndefined()
+      expect(within(coach()).queryByText('$31.50')).not.toBeInTheDocument()
+
+      await act(async () => {
+        release(snapshot({ findingCount: 1, savingsUSD: 4.25, topFindings: [] }, new Date(2026, 8, 19, 0, 1, 0).toISOString()))
+      })
+      expect(within(coach()).getByText('$4.25')).toBeInTheDocument()
+      const time = new Date(2026, 8, 19, 0, 1, 0).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      expect(within(coach()).getByText(`(as of ${time})`)).toBeInTheDocument()
+
+      // Later the same day a further re-render asks for nothing more.
+      vi.setSystemTime(new Date(2026, 8, 19, 8, 0, 0))
+      await act(async () => { rerender(view()) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(getOptimizeSnapshot).toHaveBeenCalledTimes(2)
+      expect(within(coach()).getByText('$4.25')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

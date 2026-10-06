@@ -1,0 +1,25 @@
+{
+  // celld-compatible Wrangler project. celld intentionally accepts a small
+  // subset of Wrangler config; unsupported platform bindings are omitted.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "computer-celld-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-26",
+  "compatibility_flags": ["nodejs_compat", "js_rpc"],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CelldAgent",
+        "class_name": "CelldAgent"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CelldAgent"]
+    }
+  ]
+}

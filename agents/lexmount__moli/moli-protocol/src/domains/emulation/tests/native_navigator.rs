@@ -1,0 +1,932 @@
+use super::*;
+use crate::automation::{
+    DevToolsDevicePixelRatioSetting, DevToolsSetViewportCommand, DevToolsViewportSetting,
+};
+
+async fn setup() -> TestContext {
+    let mut ctx = TestContext::new();
+    let mut bc = BrowserContext::new("BID-1".into());
+    bc.set_active_target_id("TID-1");
+    bc.attach_active_session("SID-1");
+    install_geolocation_page_for_test(&mut ctx, bc).await;
+    ctx
+}
+
+async fn set_position(ctx: &mut TestContext, latitude: f64) {
+    expect_session_command_result(ctx, 88001, "SID-1", "Emulation.setGeolocationOverride",
+        json!({"latitude": latitude, "longitude": 2, "accuracy": 3, "altitude": 4, "altitudeAccuracy": 5, "heading": 6, "speed": 7})).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_navigator_descriptors_survive_cdp_override_and_clear() {
+    let mut ctx = setup().await;
+    assert_eq!(evaluate(&mut ctx, r#"
+        globalThis.navKeys = ['onLine', 'maxTouchPoints', 'geolocation'];
+        globalThis.navGetters = navKeys.map(k => Object.getOwnPropertyDescriptor(Navigator.prototype, k).get);
+        globalThis.geo = navigator.geolocation;
+        globalThis.checkDescriptors = () => navKeys.every((k, i) =>
+            !Object.hasOwn(navigator, k) &&
+            navGetters[i] === Object.getOwnPropertyDescriptor(Navigator.prototype, k).get &&
+            Function.prototype.toString.call(navGetters[i]).includes('[native code]')) &&
+            navigator.geolocation === geo && geo instanceof Geolocation &&
+            !('__moliGeolocationState' in globalThis) && !('__moliNavigatorOnline' in globalThis);
+        checkDescriptors()
+    "#).await, json!(true));
+    set_position(&mut ctx, 1.0).await;
+    expect_session_command_result(
+        &mut ctx,
+        88002,
+        "SID-1",
+        "Emulation.setTouchEmulationEnabled",
+        json!({"enabled": true}),
+    )
+    .await;
+    expect_session_command_result(
+        &mut ctx,
+        88003,
+        "SID-1",
+        "Network.emulateNetworkConditions",
+        json!({"offline": true, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "[checkDescriptors(), navigator.onLine, navigator.maxTouchPoints]"
+        )
+        .await,
+        json!([true, false, 1])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88004,
+        "SID-1",
+        "Network.emulateNetworkConditions",
+        json!({"offline": false, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1}),
+    )
+    .await;
+    expect_session_command_result(
+        &mut ctx,
+        88005,
+        "SID-1",
+        "Emulation.setTouchEmulationEnabled",
+        json!({"enabled": false}),
+    )
+    .await;
+    expect_session_command_result(
+        &mut ctx,
+        88006,
+        "SID-1",
+        "Emulation.clearGeolocationOverride",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "[checkDescriptors(), navigator.onLine, navigator.maxTouchPoints]"
+        )
+        .await,
+        json!([true, true, 0])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_geolocation_position_has_branded_prototype_attributes() {
+    let mut ctx = setup().await;
+    set_position(&mut ctx, 1.0).await;
+    assert_eq!(evaluate(&mut ctx, r#"
+        new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(function(p) {
+            'use strict';
+            const getters = [
+                [GeolocationPosition.prototype, 'coords'], [GeolocationPosition.prototype, 'timestamp'],
+                ...['latitude','longitude','altitude','accuracy','altitudeAccuracy','heading','speed'].map(k => [GeolocationCoordinates.prototype, k])
+            ];
+            const branded = getters.every(([prototype, key]) => {
+                try { Object.getOwnPropertyDescriptor(prototype, key).get.call(Object.create(prototype)); return false; }
+                catch (e) { return e instanceof TypeError; }
+            });
+            resolve([
+                this === undefined, p instanceof GeolocationPosition, p.coords instanceof GeolocationCoordinates,
+                Object.keys(p).length, Object.keys(p.coords).length, branded,
+                p.coords.toJSON(), Number.isInteger(p.timestamp), p.toJSON().coords.latitude
+            ]);
+        }, reject))
+    "#).await, json!([true, true, true, 0, 0, true,
+        {"latitude":1,"longitude":2,"altitude":4,"accuracy":3,"altitudeAccuracy":5,"heading":6,"speed":7},true,1]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_geolocation_watch_updates_and_clear_cancels_delivery() {
+    let mut ctx = setup().await;
+    set_position(&mut ctx, 1.0).await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            r#"
+        globalThis.seen = [];
+        globalThis.nextPosition = new Promise(resolve => globalThis.nextResolve = resolve);
+        globalThis.watchId = navigator.geolocation.watchPosition(p => {
+            seen.push(p.coords.latitude); nextResolve(p.coords.latitude);
+        });
+        nextPosition
+    "#
+        )
+        .await,
+        json!(1)
+    );
+    evaluate(&mut ctx, "globalThis.nextPosition = new Promise(resolve => globalThis.nextResolve = resolve); undefined").await;
+    set_position(&mut ctx, 8.0).await;
+    assert_eq!(evaluate(&mut ctx, "nextPosition").await, json!(8));
+    evaluate(&mut ctx, "navigator.geolocation.clearWatch(watchId)").await;
+    set_position(&mut ctx, 9.0).await;
+    // A task checkpoint after the update is a deterministic cancellation fence.
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "new Promise(resolve => setTimeout(() => resolve(seen), 0))"
+        )
+        .await,
+        json!([1, 8])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_navigator_overrides_are_installed_before_author_script() {
+    let mut ctx = setup().await;
+    set_position(&mut ctx, 1.0).await;
+    expect_session_command_result(
+        &mut ctx,
+        88002,
+        "SID-1",
+        "Emulation.setTouchEmulationEnabled",
+        json!({"enabled": true}),
+    )
+    .await;
+    ctx.install_buffered_navigation_fixture_for_session_owner(
+        url::Url::parse("https://geolocation.example/next").unwrap(),
+        r#"<!doctype html><script>
+            globalThis.initialTouch = navigator.maxTouchPoints;
+            globalThis.initialPosition = new Promise((resolve, reject) =>
+                navigator.geolocation.getCurrentPosition(p => resolve(p.coords.latitude), reject));
+        </script>"#
+            .into(),
+        Some("SID-1"),
+    )
+    .await;
+    assert_eq!(evaluate(&mut ctx, "initialTouch").await, json!(1));
+    assert_eq!(evaluate(&mut ctx, "initialPosition").await, json!(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_geolocation_override_does_not_bypass_insecure_context() {
+    let mut ctx = TestContext::new();
+    load_session_page_for_pending_emulation_test(&mut ctx).await;
+    set_position(&mut ctx, 1.0).await;
+    assert_eq!(evaluate(&mut ctx, "new Promise(resolve => navigator.geolocation.getCurrentPosition(() => resolve('unexpected position'), e => resolve(e.code)))").await, json!(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_geolocation_result_uses_receiver_realm() {
+    let mut ctx = setup().await;
+    set_position(&mut ctx, 1.0).await;
+    assert_eq!(evaluate(&mut ctx, r#"
+        (async () => {
+            const frame = document.createElement('iframe');
+            frame.srcdoc = '<body>child</body>';
+            await new Promise(resolve => { frame.onload = resolve; document.body.append(frame); });
+            const child = frame.contentWindow;
+            return new Promise((resolve, reject) => Geolocation.prototype.getCurrentPosition.call(
+                child.navigator.geolocation,
+                p => resolve([p instanceof child.GeolocationPosition, p instanceof GeolocationPosition,
+                    p.coords instanceof child.GeolocationCoordinates, p.coords.latitude]), reject));
+        })()
+    "#).await, json!([true, false, true, 1]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn focus_override_updates_loaded_background_page_and_preserves_real_focus() {
+    let mut ctx = TestContext::new();
+    let mut bc = BrowserContext::new("BID-1".into());
+    bc.set_active_target_id("TID-active");
+    bc.attach_active_session("SID-active");
+    bc.insert_page_target_host(PageTargetHost::new(
+        "TID-1".into(),
+        Some("SID-1".into()),
+        TargetIdentityState::about_blank(),
+        TargetPageSlot::empty_for_test_fixture(),
+    ));
+    install_geolocation_page_for_test(&mut ctx, bc).await;
+    let snapshot = "[document.hasFocus(), document.hidden, document.visibilityState]";
+    assert_eq!(
+        evaluate(&mut ctx, snapshot).await,
+        json!([false, true, "hidden"])
+    );
+    for enabled in [true, true, false] {
+        expect_session_command_result(
+            &mut ctx,
+            88001,
+            "SID-1",
+            "Emulation.setFocusEmulationEnabled",
+            json!({"enabled": enabled}),
+        )
+        .await;
+        assert_eq!(
+            evaluate(&mut ctx, snapshot).await,
+            json!([
+                enabled,
+                !enabled,
+                if enabled { "visible" } else { "hidden" }
+            ])
+        );
+        assert_eq!(
+            ctx.conn
+                .browser_context
+                .as_ref()
+                .unwrap()
+                .active_target_id(),
+            Some("TID-active")
+        );
+    }
+    // Removing an override does not remove the real foreground target's focus.
+    let mut foreground = setup().await;
+    expect_session_command_result(
+        &mut foreground,
+        88001,
+        "SID-1",
+        "Emulation.setFocusEmulationEnabled",
+        json!({"enabled": false}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(&mut foreground, snapshot).await,
+        json!([true, false, "visible"])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn focus_override_dispatches_native_visibility_and_focus_events() {
+    let mut ctx = TestContext::new();
+    let mut bc = BrowserContext::new("BID-1".into());
+    bc.set_active_target_id("TID-active");
+    bc.attach_active_session("SID-active");
+    bc.insert_page_target_host(PageTargetHost::new(
+        "TID-1".into(),
+        Some("SID-1".into()),
+        TargetIdentityState::about_blank(),
+        TargetPageSlot::empty_for_test_fixture(),
+    ));
+    install_geolocation_page_for_test(&mut ctx, bc).await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            r#"globalThis.surfaceEvents = [];
+                document.addEventListener('visibilitychange', event =>
+                    surfaceEvents.push(['visibilitychange', event.isTrusted, event.target === document]));
+                window.addEventListener('focus', event =>
+                    surfaceEvents.push(['focus', event.isTrusted, event.target === window]));
+                window.addEventListener('blur', event =>
+                    surfaceEvents.push(['blur', event.isTrusted, event.target === window]));
+                globalThis.focusArrived = new Promise(resolve =>
+                    window.addEventListener('focus', () => resolve(), {once: true}));
+                globalThis.blurArrived = new Promise(resolve =>
+                    window.addEventListener('blur', () => resolve(), {once: true}));
+                [Object.hasOwn(document, 'hidden'), Object.hasOwn(document, 'visibilityState'),
+                 Object.hasOwn(document, 'hasFocus')]"#,
+        )
+        .await,
+        json!([false, false, false])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88001,
+        "SID-1",
+        "Emulation.setFocusEmulationEnabled",
+        json!({"enabled": true}),
+    )
+    .await;
+    // The configuration acknowledgement does not promise a rendering update.
+    // Observe the queued native events through listeners installed beforehand.
+    assert_eq!(
+        evaluate(&mut ctx, "focusArrived.then(() => surfaceEvents)").await,
+        json!([["visibilitychange", true, true], ["focus", true, true]])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88002,
+        "SID-1",
+        "Emulation.setFocusEmulationEnabled",
+        json!({"enabled": false}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(&mut ctx, "blurArrived.then(() => surfaceEvents.slice(2))").await,
+        json!([["blur", true, true], ["visibilitychange", true, true]])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn max_touch_points_updates_native_getters_and_rejects_invalid_counts_atomically() {
+    let mut ctx = setup().await;
+    evaluate(&mut ctx, "globalThis.touchGetter = Object.getOwnPropertyDescriptor(Navigator.prototype, 'maxTouchPoints').get").await;
+    for (params, expected) in [
+        (json!({"enabled": true}), 1),
+        (json!({"enabled": true, "maxTouchPoints": 5}), 5),
+        (json!({"enabled": true, "maxTouchPoints": 16}), 16),
+        (json!({"enabled": false, "maxTouchPoints": 5}), 0),
+        (json!({"enabled": true, "maxTouchPoints": 5}), 5),
+    ] {
+        expect_session_command_result(
+            &mut ctx,
+            88001,
+            "SID-1",
+            "Emulation.setTouchEmulationEnabled",
+            params,
+        )
+        .await;
+        assert_eq!(evaluate(&mut ctx, "[navigator.maxTouchPoints, touchGetter.call(navigator), touchGetter === Object.getOwnPropertyDescriptor(Navigator.prototype, 'maxTouchPoints').get]").await, json!([expected, expected, true]));
+    }
+    for enabled in [true, false] {
+        for max_touch_points in [0, 17, -1] {
+            ctx.process_async(json!({"id": 88001,"sessionId": "SID-1", "method": "Emulation.setTouchEmulationEnabled", "params": {"enabled": enabled,"maxTouchPoints": max_touch_points}})).await;
+            ctx.expect_error(88001, -32602, "Touch points must be between 1 and 16");
+            assert_eq!(
+                evaluate(&mut ctx, "navigator.maxTouchPoints").await,
+                json!(5)
+            );
+        }
+    }
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            r#"(async () => {
+        const frame = document.createElement('iframe');
+        frame.srcdoc = '<body>child</body>';
+        await new Promise(resolve => { frame.onload = resolve; document.body.append(frame); });
+        return frame.contentWindow.navigator.maxTouchPoints;
+    })()"#
+        )
+        .await,
+        json!(5)
+    );
+    ctx.install_buffered_navigation_fixture_for_session_owner(
+        url::Url::parse("https://geolocation.example/next-touch").unwrap(),
+        "<!doctype html><script>globalThis.initialTouch = navigator.maxTouchPoints;</script>"
+            .into(),
+        Some("SID-1"),
+    )
+    .await;
+    assert_eq!(evaluate(&mut ctx, "initialTouch").await, json!(5));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_metrics_zero_axes_use_visible_size_and_clear_restores_native_defaults() {
+    let mut ctx = setup().await;
+    let snapshot = "[innerWidth, innerHeight, devicePixelRatio, outerWidth, outerHeight, screen.width, screen.height]";
+    let baseline = evaluate(&mut ctx, snapshot).await;
+    let base = baseline.as_array().unwrap();
+    for (width, height, dpr, expected_width, expected_height) in [
+        (640, 480, 2, 640, 480),
+        (1000, 0, 2, 1000, 480),
+        (0, 0, 0, 640, 480),
+        (0, 200, 0, 640, 200),
+        (0, 0, 0, 640, 480),
+    ] {
+        expect_session_command_result(
+            &mut ctx,
+            88001,
+            "SID-1",
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": width,"height": height,"deviceScaleFactor": dpr,"mobile": false}),
+        )
+        .await;
+        assert_eq!(
+            evaluate(&mut ctx, snapshot).await,
+            json!([
+                expected_width,
+                expected_height,
+                if dpr == 0 {
+                    base[2].clone()
+                } else {
+                    json!(dpr)
+                },
+                base[3],
+                base[4],
+                base[5],
+                base[6]
+            ])
+        );
+    }
+    let previous = evaluate(&mut ctx, snapshot).await;
+    for invalid in [
+        json!({"width": -1}),
+        json!({"height": 10_000_001}),
+        json!({"deviceScaleFactor": -1}),
+        json!({"screenWidth": -1}),
+    ] {
+        let mut params = json!({"width":640,"height":480,"deviceScaleFactor":1,"mobile":false});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(invalid.as_object().unwrap().clone());
+        ctx.process_async(json!({"id":88001,"sessionId":"SID-1", "method":"Emulation.setDeviceMetricsOverride","params":params})).await;
+        ctx.expect_error(88001, -32602, "InvalidParams");
+        assert_eq!(evaluate(&mut ctx, snapshot).await, previous);
+    }
+    expect_session_command_result(&mut ctx, 88001, "SID-1", "Emulation.setDeviceMetricsOverride",
+        json!({"width":640,"height":480,"deviceScaleFactor":1,"mobile":false,"screenWidth":1500,"screenHeight":1200})).await;
+    assert_eq!(
+        evaluate(&mut ctx, "[screen.width,screen.height,screen.availHeight]").await,
+        json!([1500, 1200, 1200])
+    );
+    expect_session_command_result(&mut ctx, 88001, "SID-1", "Emulation.setDeviceMetricsOverride",
+        json!({"width":640,"height":480,"deviceScaleFactor":1,"mobile":false,"screenWidth":1500,"screenHeight":0})).await;
+    assert_eq!(
+        evaluate(&mut ctx, "[screen.width,screen.height]").await,
+        json!([base[5], base[6]])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88001,
+        "SID-1",
+        "Emulation.clearDeviceMetricsOverride",
+        json!({}),
+    )
+    .await;
+    assert_eq!(evaluate(&mut ctx, snapshot).await, baseline);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_throttling_rejects_before_changing_live_offline_state() {
+    let mut ctx = setup().await;
+    for offline in [false, true] {
+        expect_session_command_result(
+            &mut ctx,
+            88001,
+            "SID-1",
+            "Network.emulateNetworkConditions",
+            json!({"offline":offline,"latency":0,"downloadThroughput":-1,"uploadThroughput":0}),
+        )
+        .await;
+        for unsupported in [
+            json!({"latency":100}),
+            json!({"downloadThroughput":1024}),
+            json!({"uploadThroughput":1024}),
+            json!({"connectionType":"cellular3g"}),
+            json!({"packetLoss":1}),
+            json!({"packetQueueLength":1}),
+            json!({"packetReordering":true}),
+        ] {
+            let mut params = json!({"offline": !offline,"latency":0,"downloadThroughput":-1,"uploadThroughput":-1});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(unsupported.as_object().unwrap().clone());
+            ctx.process_async(json!({"id":88001,"sessionId":"SID-1","method":"Network.emulateNetworkConditions","params":params})).await;
+            ctx.expect_error(
+                88001,
+                -32000,
+                "Network throttling and connection type overrides are not supported",
+            );
+            assert_eq!(
+                evaluate(&mut ctx, "navigator.onLine").await,
+                json!(!offline)
+            );
+        }
+    }
+    for rate in [-1.0, 0.0, 0.5, 1.0] {
+        expect_session_command_result(
+            &mut ctx,
+            88001,
+            "SID-1",
+            "Emulation.setCPUThrottlingRate",
+            json!({"rate":rate}),
+        )
+        .await;
+    }
+    ctx.process_async(json!({"id":88001,"sessionId":"SID-1","method":"Emulation.setCPUThrottlingRate","params":{"rate":4}})).await;
+    ctx.expect_error(88001, -32000, "CPU throttling is not supported");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_viewport_overrides_preserve_getters_and_ignore_page_property_hooks() {
+    let mut ctx = setup().await;
+    assert_eq!(evaluate(&mut ctx,r#"
+        globalThis.originalInner = Object.getOwnPropertyDescriptor(globalThis, 'innerWidth').get;
+        globalThis.originalDpr = Object.getOwnPropertyDescriptor(globalThis, 'devicePixelRatio').get;
+        globalThis.originalScreenWidth = Object.getOwnPropertyDescriptor(Screen.prototype, 'width').get;
+        globalThis.heldScreen = screen;
+        globalThis.heldVisual = visualViewport;
+        globalThis.originalDefine = Object.defineProperty;
+        Object.defineProperty(globalThis, '__moliDeviceMetricsOriginalDescriptors', {
+            configurable: true, get() { throw new Error('page-owned property'); }
+        });
+        Object.defineProperty = () => { throw new Error('page-owned defineProperty'); };
+        true
+    "#).await,json!(true));
+    for width in [640, 800] {
+        expect_session_command_result(&mut ctx,88001,"SID-1","Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":480,"deviceScaleFactor":2,"mobile":false,"screenWidth":1000,"screenHeight":700})).await;
+        assert_eq!(
+            evaluate(
+                &mut ctx,
+                r#"[
+            innerWidth, originalInner.call(globalThis), heldVisual.width,
+            devicePixelRatio, originalDpr.call(globalThis),
+            heldScreen.width, originalScreenWidth.call(heldScreen),
+            originalInner === Object.getOwnPropertyDescriptor(globalThis,'innerWidth').get,
+            originalScreenWidth === Object.getOwnPropertyDescriptor(Screen.prototype,'width').get,
+            Function.prototype.toString.call(originalInner).includes('[native code]')
+        ]"#
+            )
+            .await,
+            json!([width, width, width, 2, 2, 1000, 1000, true, true, true])
+        );
+    }
+    expect_session_command_result(
+        &mut ctx,
+        88001,
+        "SID-1",
+        "Emulation.clearDeviceMetricsOverride",
+        json!({}),
+    )
+    .await;
+    assert_eq!(evaluate(&mut ctx,"[innerWidth === originalInner.call(globalThis), originalInner === Object.getOwnPropertyDescriptor(globalThis,'innerWidth').get, !Object.hasOwn(screen,'width')]").await,json!([true,true,true]));
+    evaluate(&mut ctx,"Object.defineProperty = originalDefine; delete globalThis.__moliDeviceMetricsOriginalDescriptors").await;
+    expect_session_command_result(&mut ctx,88001,"SID-1","Emulation.setDeviceMetricsOverride",
+        json!({"width":800,"height":600,"deviceScaleFactor":2,"mobile":false,"screenWidth":1000,"screenHeight":700})).await;
+    assert_eq!(evaluate(&mut ctx,r#"(async () => {
+        const frame = document.createElement('iframe');
+        frame.style.width = '321px'; frame.style.height = '123px'; frame.srcdoc = '<body>child</body>';
+        await new Promise(resolve => { frame.onload = resolve; document.body.append(frame); });
+        const child = frame.contentWindow;
+        return [child.innerWidth, child.visualViewport.width, child.devicePixelRatio, child.screen.width];
+    })()"#).await,json!([321,321,2,1000]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clearing_target_metrics_restores_browser_context_viewport_defaults() {
+    let mut ctx = setup().await;
+    let (result, _) = ctx
+        .conn
+        .execute_automation_command(AutomationCommand::SetViewport(DevToolsSetViewportCommand {
+            context: bidi_command_context(),
+            browser_context_ids: vec!["BID-1".into()],
+            viewport: DevToolsViewportSetting::Dimensions {
+                width: 900,
+                height: 700,
+            },
+            device_pixel_ratio: DevToolsDevicePixelRatioSetting::Scale(3.0),
+            screen_width: None,
+            screen_height: None,
+        }))
+        .await
+        .into_parts();
+    assert_eq!(
+        result.expect("context viewport default"),
+        AutomationResult::Empty
+    );
+    assert_eq!(
+        evaluate(&mut ctx, "[innerWidth, innerHeight, devicePixelRatio]").await,
+        json!([900, 700, 3])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88001,
+        "SID-1",
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":640,"height":480,"deviceScaleFactor":0,"mobile":false}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(&mut ctx, "[innerWidth, innerHeight, devicePixelRatio]").await,
+        json!([640, 480, 3])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88001,
+        "SID-1",
+        "Emulation.clearDeviceMetricsOverride",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(&mut ctx, "[innerWidth, innerHeight, devicePixelRatio]").await,
+        json!([900, 700, 3])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hardware_concurrency_override_is_native_and_precedes_document_scripts() {
+    let mut ctx = setup().await;
+    evaluate(&mut ctx, "globalThis.hardwareGetter = Object.getOwnPropertyDescriptor(Navigator.prototype, 'hardwareConcurrency').get; undefined").await;
+    for value in [2, i32::MAX] {
+        expect_session_command_result(
+            &mut ctx,
+            88100,
+            "SID-1",
+            "Emulation.setHardwareConcurrencyOverride",
+            json!({"hardwareConcurrency":value}),
+        )
+        .await;
+        assert_eq!(evaluate(&mut ctx, r#"[
+            navigator.hardwareConcurrency,
+            hardwareGetter.call(navigator),
+            hardwareGetter === Object.getOwnPropertyDescriptor(Navigator.prototype, 'hardwareConcurrency').get,
+            !Object.hasOwn(navigator, 'hardwareConcurrency')
+        ]"#).await, json!([value, value, true, true]));
+    }
+    for value in [
+        json!(0),
+        json!(-1),
+        json!(2147483648_u64),
+        json!(1.5),
+        json!("2"),
+        json!(null),
+    ] {
+        ctx.process_async(json!({"id":88101,"sessionId":"SID-1", "method":"Emulation.setHardwareConcurrencyOverride", "params":{"hardwareConcurrency":value}})).await;
+        let reply = ctx.take_response_by_id(88101);
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert_eq!(
+            evaluate(&mut ctx, "navigator.hardwareConcurrency").await,
+            json!(i32::MAX)
+        );
+    }
+    expect_session_command_result(
+        &mut ctx,
+        88102,
+        "SID-1",
+        "Emulation.setHardwareConcurrencyOverride",
+        json!({"hardwareConcurrency":3}),
+    )
+    .await;
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<script>globalThis.childReady=new Promise(r=>globalThis.childDone=r);globalThis.initialHardware=navigator.hardwareConcurrency</script><iframe srcdoc='<script>globalThis.initialHardware=navigator.hardwareConcurrency;parent.childDone()</script>'></iframe>", Some("SID-1")
+    ).await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "childReady.then(() => [initialHardware, frames[0].initialHardware, frames[0].navigator.hardwareConcurrency])"
+        )
+        .await,
+        json!([3, 3, 3])
+    );
+    expect_session_command_result(
+        &mut ctx,
+        88103,
+        "SID-1",
+        "Emulation.setHardwareConcurrencyOverride",
+        json!({"hardwareConcurrency":5}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "[navigator.hardwareConcurrency, frames[0].navigator.hardwareConcurrency]"
+        )
+        .await,
+        json!([5, 5])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hardware_concurrency_sessions_follow_agent_activation_and_detach() {
+    let mut ctx = setup().await;
+    ctx.conn.register_top_level_page_target("TID-1");
+    let baseline = evaluate(&mut ctx, "navigator.hardwareConcurrency").await;
+    let mut sessions = Vec::new();
+    for id in [88110, 88111] {
+        ctx.process_async(json!({"id":id,"method":"Target.attachToTarget", "params":{"targetId":"TID-1","flatten":true}})).await;
+        sessions.push(
+            ctx.take_response_by_id(id)["result"]["sessionId"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    // The second attached session activates first, through a different Emulation API.
+    expect_session_command_result(
+        &mut ctx,
+        88112,
+        &sessions[1],
+        "Emulation.setUserAgentOverride",
+        json!({"userAgent":"emulation-query-test"}),
+    )
+    .await;
+    for (session, value, effective) in [(0, 2, 2), (1, 8, 2), (0, 3, 3)] {
+        expect_session_command_result(
+            &mut ctx,
+            88113,
+            &sessions[session],
+            "Emulation.setHardwareConcurrencyOverride",
+            json!({"hardwareConcurrency":value}),
+        )
+        .await;
+        assert_eq!(
+            evaluate(&mut ctx, "navigator.hardwareConcurrency").await,
+            json!(effective)
+        );
+    }
+    for (session, expected) in [(0, json!(8)), (1, baseline)] {
+        ctx.process_async(json!({"id":88114,"method":"Target.detachFromTarget","params":{"sessionId":sessions[session]}})).await;
+        ctx.expect_result(88114, json!({}), None);
+        assert_eq!(
+            evaluate(&mut ctx, "navigator.hardwareConcurrency").await,
+            expected
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_saver_updates_held_native_objects_and_clears_session_contributions() {
+    let mut ctx = setup().await;
+    evaluate(&mut ctx, "globalThis.connection = navigator.connection; globalThis.saveDataGetter = Object.getOwnPropertyDescriptor(connection, 'saveData').get; undefined").await;
+    for (params, expected) in [
+        (json!({"dataSaverEnabled":true}), true),
+        (json!({"dataSaverEnabled":false}), false),
+        (json!({}), false),
+    ] {
+        expect_session_command_result(
+            &mut ctx,
+            88200,
+            "SID-1",
+            "Emulation.setDataSaverOverride",
+            params,
+        )
+        .await;
+        assert_eq!(evaluate(&mut ctx, "[connection.saveData, saveDataGetter.call(connection), connection === navigator.connection, saveDataGetter === Object.getOwnPropertyDescriptor(connection, 'saveData').get]").await, json!([expected,expected,true,true]));
+    }
+    expect_session_command_result(
+        &mut ctx,
+        88201,
+        "SID-1",
+        "Emulation.setDataSaverOverride",
+        json!({"dataSaverEnabled":true}),
+    )
+    .await;
+    ctx.process_async(json!({"id":88202,"sessionId":"SID-1","method":"Emulation.setDataSaverOverride","params":{"dataSaverEnabled":"false"}})).await;
+    assert_eq!(ctx.take_response_by_id(88202)["error"]["code"], -32602);
+    ctx.install_navigation_fixture_for_session_owner("data:text/html,<script>globalThis.initialSaveData=navigator.connection.saveData</script><iframe></iframe>",Some("SID-1")).await;
+    assert_eq!(evaluate(&mut ctx, "[initialSaveData,navigator.connection.saveData,frames[0].navigator.connection.saveData]").await, json!([true,true,true]));
+    ctx.conn.register_top_level_page_target("TID-1");
+    ctx.process_async(json!({"id":88203,"method":"Target.attachToTarget","params":{"targetId":"TID-1","flatten":true}})).await;
+    let other = ctx.take_response_by_id(88203)["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (params, expected) in [
+        (json!({"dataSaverEnabled":false}), false),
+        (json!({}), true),
+        (json!({"dataSaverEnabled":false}), false),
+    ] {
+        expect_session_command_result(
+            &mut ctx,
+            88204,
+            &other,
+            "Emulation.setDataSaverOverride",
+            params,
+        )
+        .await;
+        assert_eq!(
+            evaluate(
+                &mut ctx,
+                "[navigator.connection.saveData,frames[0].navigator.connection.saveData]"
+            )
+            .await,
+            json!([expected, expected])
+        );
+    }
+    ctx.process_async(
+        json!({"id":88205,"method":"Target.detachFromTarget","params":{"sessionId":other}}),
+    )
+    .await;
+    ctx.expect_result(88205, json!({}), None);
+    assert_eq!(
+        evaluate(&mut ctx, "navigator.connection.saveData").await,
+        json!(true)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automation_overrides_combine_sessions_without_replacing_native_getters() {
+    let mut ctx = setup().await;
+    evaluate(&mut ctx,"globalThis.webdriverGetter=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver').get; undefined").await;
+    expect_session_command_result(
+        &mut ctx,
+        88300,
+        "SID-1",
+        "Emulation.setAutomationOverride",
+        json!({"enabled":false}),
+    )
+    .await;
+    ctx.conn.register_top_level_page_target("TID-1");
+    ctx.process_async(json!({"id":88301,"method":"Target.attachToTarget","params":{"targetId":"TID-1","flatten":true}})).await;
+    let other = ctx.take_response_by_id(88301)["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    expect_session_command_result(
+        &mut ctx,
+        88302,
+        &other,
+        "Emulation.setHardwareConcurrencyOverride",
+        json!({"hardwareConcurrency":8}),
+    )
+    .await;
+    expect_session_command_result(
+        &mut ctx,
+        88303,
+        "SID-1",
+        "Emulation.setHardwareConcurrencyOverride",
+        json!({"hardwareConcurrency":2}),
+    )
+    .await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "[navigator.hardwareConcurrency,navigator.webdriver]"
+        )
+        .await,
+        json!([2, false]),
+        "automation=false must not activate an agent before its first query override"
+    );
+    for (session, enabled) in [
+        ("SID-1", true),
+        (other.as_str(), false),
+        (other.as_str(), true),
+        ("SID-1", false),
+    ] {
+        expect_session_command_result(
+            &mut ctx,
+            88304,
+            session,
+            "Emulation.setAutomationOverride",
+            json!({"enabled":enabled}),
+        )
+        .await;
+        assert_eq!(evaluate(&mut ctx,"[navigator.webdriver,webdriverGetter.call(navigator),webdriverGetter===Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver').get]").await,json!([true,true,true]));
+    }
+    ctx.process_async(json!({"id":88305,"sessionId":other,"method":"Emulation.setAutomationOverride","params":{"enabled":0}})).await;
+    assert_eq!(ctx.take_response_by_id(88305)["error"]["code"], -32602);
+    ctx.install_navigation_fixture_for_session_owner("data:text/html,<script>globalThis.initialAutomation=navigator.webdriver</script><iframe></iframe>",Some("SID-1")).await;
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "[initialAutomation,navigator.webdriver,frames[0].navigator.webdriver]"
+        )
+        .await,
+        json!([true, true, true])
+    );
+    ctx.process_async(
+        json!({"id":88306,"method":"Target.detachFromTarget","params":{"sessionId":other}}),
+    )
+    .await;
+    ctx.expect_result(88306, json!({}), None);
+    assert_eq!(
+        evaluate(
+            &mut ctx,
+            "[navigator.webdriver,navigator.hardwareConcurrency]"
+        )
+        .await,
+        json!([false, 2])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_configuration_survives_replacement_and_preserves_replay_policy() {
+    let mut ctx = setup().await;
+    ctx.take_all();
+    let raw = json!({"id": 88200, "sessionId": "SID-1",
+        "method": "Emulation.setHardwareConcurrencyOverride",
+        "params": {"hardwareConcurrency": 4}})
+    .to_string();
+    let pending = ctx.conn.try_start_pending_command_dispatch(&raw).unwrap();
+    assert_eq!(pending.kind_name(), "Native");
+    // Hold the adapter after the producer committed its terminal, then replace
+    // the document. Neither replay policy nor completion ownership may depend
+    // on polling that adapter before the navigation.
+    let completed = pending.wait().await;
+    ctx.process_async(json!({"id": 88201, "sessionId": "SID-1", "method": "Page.navigate",
+        "params": {"url": "data:text/html,<script>window.initialHardware=navigator.hardwareConcurrency</script>"}})).await;
+    let messages = ctx.take_all();
+    let replies = messages
+        .iter()
+        .filter(|message| message["id"] == 88200)
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 1, "{messages:?}");
+    assert_eq!(replies[0]["result"], json!({}));
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("published configuration must not restart");
+    };
+    let (late, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(
+        late.iter().all(|message| message["id"] != 88200),
+        "{late:?}"
+    );
+    assert_eq!(
+        evaluate(&mut ctx, "[initialHardware,navigator.hardwareConcurrency]").await,
+        json!([4, 4])
+    );
+}

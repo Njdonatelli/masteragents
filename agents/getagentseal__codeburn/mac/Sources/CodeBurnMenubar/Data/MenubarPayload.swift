@@ -1,0 +1,811 @@
+import Foundation
+
+/// Shape of `codeburn status --format menubar-json --period <period>`.
+/// `current` is scoped to the requested period; the whole payload reflects that slice.
+struct MenubarPayload: Codable, Sendable {
+    let generated: String
+    /// Present and `true` only when this payload was assembled from a
+    /// read-only stale serve. Absent — never `false` — on a fresh payload;
+    /// absence must be read as "assume fresh," including for payloads from
+    /// a CLI version that predates this field.
+    let stale: Bool?
+    let current: CurrentBlock
+    let optimize: OptimizeBlock
+    let history: HistoryBlock
+    let combined: CombinedUsage?
+    let claudeConfigs: ClaudeConfigSelector?
+    /// Sessions whose transcript was appended inside the CLI's liveness window.
+    /// Absent on payloads from a CLI that predates the block, so absence means
+    /// "unknown", not "nothing running": the popover hides the section either way.
+    let liveSessions: LiveSessionsBlock?
+    /// The CLI's anonymised daily aggregate (`src/telemetry-snapshot.ts`),
+    /// carried opaquely so telemetry forwards exactly what the CLI computed
+    /// rather than re-deriving any of it here. Absent on an older CLI.
+    let telemetrySnapshot: JSONValue?
+    /// Cursor's usage sync from cursor.com. Absent on an older CLI and whenever
+    /// Cursor is not on this machine.
+    let cursorSync: CursorSyncStatus?
+
+    init(generated: String,
+         current: CurrentBlock,
+         optimize: OptimizeBlock,
+         history: HistoryBlock,
+         combined: CombinedUsage?,
+         claudeConfigs: ClaudeConfigSelector? = nil,
+         stale: Bool? = nil,
+         liveSessions: LiveSessionsBlock? = nil,
+         telemetrySnapshot: JSONValue? = nil,
+         cursorSync: CursorSyncStatus? = nil) {
+        self.cursorSync = cursorSync
+        self.liveSessions = liveSessions
+        self.telemetrySnapshot = telemetrySnapshot
+        self.generated = generated
+        self.stale = stale
+        self.current = current
+        self.optimize = optimize
+        self.history = history
+        self.combined = combined
+        self.claudeConfigs = claudeConfigs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case generated, stale, current, optimize, history, combined, claudeConfigs, liveSessions
+        case telemetrySnapshot, cursorSync
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        generated = try c.decode(String.self, forKey: .generated)
+        stale = try c.decodeIfPresent(Bool.self, forKey: .stale)
+        current = try c.decode(CurrentBlock.self, forKey: .current)
+        optimize = try c.decode(OptimizeBlock.self, forKey: .optimize)
+        history = try c.decode(HistoryBlock.self, forKey: .history)
+        combined = try c.decodeIfPresent(CombinedUsage.self, forKey: .combined)
+        claudeConfigs = try c.decodeIfPresent(ClaudeConfigSelector.self, forKey: .claudeConfigs)
+        liveSessions = try c.decodeIfPresent(LiveSessionsBlock.self, forKey: .liveSessions)
+        telemetrySnapshot = try c.decodeIfPresent(JSONValue.self, forKey: .telemetrySnapshot)
+        // A status line must never cost the whole payload.
+        cursorSync = try? c.decodeIfPresent(CursorSyncStatus.self, forKey: .cursorSync)
+    }
+}
+
+struct CursorSyncStatus: Codable, Sendable, Equatable {
+    let enabled: Bool
+    let state: String
+    let lastSuccessAt: String?
+    let errorCode: String?
+    let error: String?
+
+    /// The one line the popover and Settings show; nil when the sync is off.
+    /// Error codes map to fixed copy, never the CLI's text.
+    func line(now: Date = Date()) -> (text: String, warn: Bool)? {
+        if state == "off" { return nil }
+        if let errorCode {
+            switch errorCode {
+            case "login": return (L("Cursor login expired, open Cursor to sign in again"), true)
+            case "network": return (L("Couldn't reach cursor.com, will retry"), true)
+            default: return (L("Couldn't read the usage export from cursor.com, will retry"), true)
+            }
+        }
+        guard let lastSuccessAt, let date = LiveSession.parseISO8601(lastSuccessAt) else {
+            return (L("Not synced from cursor.com yet"), false)
+        }
+        return (L("Synced from cursor.com %@", CodexBankedResetPresentation.compactAge(of: date, now: now)), false)
+    }
+
+    /// The config says on, but the CLI reports off: CODEBURN_CURSOR_SYNC=0 wins.
+    static func envOff(configEnabled: Bool, status: CursorSyncStatus?) -> Bool {
+        configEnabled && status?.enabled == false
+    }
+
+    /// What the Settings switch says under itself.
+    static func settingsFooter(configEnabled: Bool, status: CursorSyncStatus?, now: Date = Date()) -> String {
+        if envOff(configEnabled: configEnabled, status: status) { return L("Turned off by CODEBURN_CURSOR_SYNC=0") }
+        if configEnabled, let line = status?.line(now: now) { return line.text }
+        return L("Downloads your own usage export with the Cursor app's login, at most once an hour.")
+    }
+}
+
+struct LiveSessionsBlock: Codable, Sendable {
+    let windowSeconds: Int
+    let sessions: [LiveSession]
+}
+
+struct LiveSession: Codable, Sendable, Identifiable {
+    let id: String
+    /// Provider catalog id, matching the dock ring the session runs under.
+    let provider: String
+    let project: String
+    let branch: String?
+    let model: String?
+    let contextTokens: Int?
+    let contextWindow: Int?
+    let startedAt: String
+    let lastActivityAt: String
+    /// Seconds since this session last wrote, as of the payload's build. Absent
+    /// on payloads from a CLI that predates it, which reads as "not idle".
+    var idleSeconds: Int? = nil
+
+    /// A live session that is waiting on the user rather than generating. The
+    /// panel dims these so the two states are told apart at a glance.
+    var isIdle: Bool { (idleSeconds ?? 0) > Self.idleThresholdSeconds }
+
+    static let idleThresholdSeconds = 120
+
+    /// Row title: the folder in flight, plus the branch when the transcript
+    /// named one.
+    var title: String {
+        guard let branch, !branch.isEmpty else { return project }
+        return "\(project) · \(branch)"
+    }
+
+    /// Fraction of the context window in use, nil when the CLI could not read
+    /// a usage record so the row renders without a ring.
+    var contextFraction: Double? {
+        guard let contextTokens, let contextWindow, contextWindow > 0 else { return nil }
+        return min(max(Double(contextTokens) / Double(contextWindow), 0), 1)
+    }
+
+    var contextRemaining: Int? {
+        guard let contextTokens, let contextWindow else { return nil }
+        return max(0, contextWindow - contextTokens)
+    }
+
+    /// How long this session has been open, in the same shape the quota rows use
+    /// for resets. Empty when the timestamp is unparseable.
+    func elapsedLabel(now: Date = Date()) -> String {
+        guard let started = Self.parseISO8601(startedAt) else { return "" }
+        let minutes = Int(max(0, now.timeIntervalSince(started)) / 60)
+        let hours = minutes / 60
+        if hours > 0 { return "\(hours)h \(minutes % 60)m" }
+        return "\(minutes)m"
+    }
+
+    /// The CLI stamps milliseconds; the plain formatter rejects those, so try the
+    /// fractional variant first.
+    static func parseISO8601(_ value: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: value) { return date }
+        return ISO8601DateFormatter().date(from: value)
+    }
+}
+
+struct ClaudeConfigSelector: Codable, Sendable {
+    let selectedId: String?
+    let options: [ClaudeConfigOption]
+}
+
+struct ClaudeConfigOption: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    let label: String
+    let path: String
+}
+
+struct CombinedUsage: Codable, Sendable {
+    let perDevice: [CombinedDeviceUsage]
+    let combined: CombinedUsageTotals
+}
+
+struct CombinedDeviceUsage: Codable, Sendable {
+    let id: String
+    let name: String
+    let local: Bool
+    let error: String?
+    let cost: Double
+    let calls: Int
+    let sessions: Int
+    let inputTokens: Int
+    let outputTokens: Int
+    let cacheCreateTokens: Int
+    let cacheReadTokens: Int
+    let totalTokens: Int
+}
+
+struct CombinedUsageTotals: Codable, Sendable {
+    let cost: Double
+    let calls: Int
+    let sessions: Int
+    let inputTokens: Int
+    let outputTokens: Int
+    let cacheCreateTokens: Int
+    let cacheReadTokens: Int
+    let totalTokens: Int
+    let deviceCount: Int
+    let reachableCount: Int
+}
+
+struct HistoryBlock: Codable, Sendable {
+    let daily: [DailyHistoryEntry]
+}
+
+struct DailyModelBreakdown: Codable, Sendable {
+    let name: String
+    let cost: Double
+    let savingsUSD: Double
+    let calls: Int
+    let inputTokens: Int
+    let outputTokens: Int
+
+    var totalTokens: Int { inputTokens + outputTokens }
+
+    enum CodingKeys: String, CodingKey {
+        case name, cost, savingsUSD, calls, inputTokens, outputTokens
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        calls = try c.decode(Int.self, forKey: .calls)
+        inputTokens = try c.decode(Int.self, forKey: .inputTokens)
+        outputTokens = try c.decode(Int.self, forKey: .outputTokens)
+    }
+}
+
+struct DailyHistoryEntry: Codable, Sendable {
+    let date: String
+    let cost: Double
+    let savingsUSD: Double
+    let calls: Int
+    let inputTokens: Int
+    let outputTokens: Int
+    let cacheReadTokens: Int
+    let cacheWriteTokens: Int
+    let topModels: [DailyModelBreakdown]
+
+    /// Pricing-ratio prior: input + 5x output + cache_creation + 0.1x cache_read.
+    /// Matches Anthropic's published per-token pricing on Sonnet/Opus closely enough to be a useful proxy.
+    var effectiveTokens: Double {
+        Double(inputTokens) + 5.0 * Double(outputTokens) + Double(cacheWriteTokens) + 0.1 * Double(cacheReadTokens)
+    }
+}
+
+extension DailyHistoryEntry {
+    /// Required for legacy payloads (no topModels emitted yet).
+    enum CodingKeys: String, CodingKey {
+        case date, cost, savingsUSD, calls, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, topModels
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decode(String.self, forKey: .date)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        calls = try c.decode(Int.self, forKey: .calls)
+        inputTokens = try c.decode(Int.self, forKey: .inputTokens)
+        outputTokens = try c.decode(Int.self, forKey: .outputTokens)
+        cacheReadTokens = try c.decode(Int.self, forKey: .cacheReadTokens)
+        cacheWriteTokens = try c.decode(Int.self, forKey: .cacheWriteTokens)
+        topModels = try c.decodeIfPresent([DailyModelBreakdown].self, forKey: .topModels) ?? []
+    }
+}
+
+struct RetryTaxModelEntry: Codable, Sendable {
+    let name: String
+    let taxUSD: Double
+    let retries: Int
+    let retriesPerEdit: Double?
+}
+
+struct RetryTax: Codable, Sendable {
+    let totalUSD: Double
+    let retries: Int
+    let editTurns: Int
+    let byModel: [RetryTaxModelEntry]
+}
+
+struct RoutingWasteModelEntry: Codable, Sendable {
+    let name: String
+    let costPerEdit: Double
+    let editTurns: Int
+    let actualUSD: Double
+    let counterfactualUSD: Double
+    let savingsUSD: Double
+}
+
+struct RoutingWaste: Codable, Sendable {
+    let totalSavingsUSD: Double
+    let baselineModel: String
+    let baselineCostPerEdit: Double
+    let byModel: [RoutingWasteModelEntry]
+}
+
+/// Workflow-intelligence rollup for the period. `correctionRate` and
+/// `medianTimeToFirstEditMs` are null when not computable (no user turns / no
+/// session ever edited), so both are optional.
+struct WorkflowBlock: Codable, Sendable {
+    let corrections: Int
+    let correctionRate: Double?
+    let medianTimeToFirstEditMs: Double?
+}
+
+/// One entry of `topReworkedFiles`. `path` is basename-only (the CLI trims it
+/// for privacy before the payload can leave the machine); `sessions` is the
+/// distinct-session count and `edits` the total edit-family calls.
+struct ReworkedFileEntry: Codable, Sendable {
+    let path: String
+    let sessions: Int
+    let edits: Int
+}
+
+struct CurrentBlock: Codable, Sendable {
+    let label: String
+    let cost: Double
+    let calls: Int
+    let sessions: Int
+    /// How `sessions` was derived. Nil on older payloads. `identity` is exact;
+    /// `partial` is a lower bound.
+    var sessionCountBasis: String? = nil
+    let oneShotRate: Double?
+    let inputTokens: Int
+    let outputTokens: Int
+    let cacheHitPercent: Double
+    /// Codex credits consumed in the period (nil on payloads from older builds).
+    let codexCredits: Double?
+    let topActivities: [ActivityEntry]
+    let topModels: [ModelEntry]
+    let localModelSavings: LocalModelSavings
+    let providers: [String: Double]
+    /// Stable provider identity plus period activity. Empty for older CLI payloads.
+    var providerDetails: [ProviderDetail] = []
+    let topProjects: [ProjectEntry]
+    let modelEfficiency: [ModelEfficiencyEntry]
+    let topSessions: [TopSessionEntry]
+    let retryTax: RetryTax
+    let routingWaste: RoutingWaste
+    let tools: [ToolEntry]
+    let skills: [SkillEntry]
+    let subagents: [SubagentEntry]
+    let mcpServers: [McpServerEntry]
+    /// Workflow-intelligence rollup. Optional so payloads from older CLIs
+    /// (which never emit it) still decode; absent -> the Workflow strip hides.
+    /// Declared last with a default so the memberwise initializer stays
+    /// backward-compatible for existing construction sites.
+    var workflow: WorkflowBlock? = nil
+    /// Files most reworked by edit-family calls. Empty on older CLIs.
+    var topReworkedFiles: [ReworkedFileEntry] = []
+    /// Attributed pull-request spend for the period (all-provider payloads
+    /// only). Optional so payloads from older CLIs still decode; absent or
+    /// empty -> the Pull requests section hides.
+    var pullRequests: PullRequestsBlock? = nil
+    /// Models with recorded usage whose cost prices at $0 for lack of pricing
+    /// data (#1420). Their usage ran, so the figure is unknown, not zero —
+    /// but no cost-table floor ever shows them. Empty on older CLI payloads;
+    /// absent or empty -> the Models section's unpriced line hides.
+    var unpricedModels: [UnpricedModelEntry] = []
+}
+
+struct UnpricedModelEntry: Codable, Sendable, Equatable {
+    let model: String
+    let calls: Int
+    let tokens: Int
+}
+
+struct PullRequestsBlock: Codable, Sendable {
+    let rows: [PullRequestRow]
+}
+
+struct PullRequestRow: Codable, Sendable {
+    let url: String
+    let label: String
+    let cost: Double
+    let sessions: Int
+}
+
+extension CurrentBlock {
+    enum CodingKeys: String, CodingKey {
+        case label, cost, calls, sessions, sessionCountBasis, oneShotRate, inputTokens, outputTokens,
+             cacheHitPercent, codexCredits, topActivities, topModels, localModelSavings, providers, providerDetails, topProjects,
+             modelEfficiency, topSessions, retryTax, routingWaste,
+             tools, skills, subagents, mcpServers,
+             workflow, topReworkedFiles, pullRequests, unpricedModels
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decode(String.self, forKey: .label)
+        cost = try c.decode(Double.self, forKey: .cost)
+        calls = try c.decode(Int.self, forKey: .calls)
+        sessions = try c.decode(Int.self, forKey: .sessions)
+        sessionCountBasis = try c.decodeIfPresent(String.self, forKey: .sessionCountBasis)
+        oneShotRate = try c.decodeIfPresent(Double.self, forKey: .oneShotRate)
+        inputTokens = try c.decode(Int.self, forKey: .inputTokens)
+        outputTokens = try c.decode(Int.self, forKey: .outputTokens)
+        cacheHitPercent = try c.decodeIfPresent(Double.self, forKey: .cacheHitPercent) ?? 0
+        codexCredits = try c.decodeIfPresent(Double.self, forKey: .codexCredits)
+        topActivities = try c.decodeIfPresent([ActivityEntry].self, forKey: .topActivities) ?? []
+        topModels = try c.decodeIfPresent([ModelEntry].self, forKey: .topModels) ?? []
+        localModelSavings = try c.decodeIfPresent(LocalModelSavings.self, forKey: .localModelSavings) ?? LocalModelSavings(totalUSD: 0, calls: 0, byModel: [], byProvider: [])
+        providers = try c.decodeIfPresent([String: Double].self, forKey: .providers) ?? [:]
+        providerDetails = try c.decodeIfPresent([ProviderDetail].self, forKey: .providerDetails) ?? []
+        topProjects = try c.decodeIfPresent([ProjectEntry].self, forKey: .topProjects) ?? []
+        modelEfficiency = try c.decodeIfPresent([ModelEfficiencyEntry].self, forKey: .modelEfficiency) ?? []
+        topSessions = try c.decodeIfPresent([TopSessionEntry].self, forKey: .topSessions) ?? []
+        retryTax = try c.decodeIfPresent(RetryTax.self, forKey: .retryTax) ?? RetryTax(totalUSD: 0, retries: 0, editTurns: 0, byModel: [])
+        routingWaste = try c.decodeIfPresent(RoutingWaste.self, forKey: .routingWaste) ?? RoutingWaste(totalSavingsUSD: 0, baselineModel: "", baselineCostPerEdit: 0, byModel: [])
+        tools = try c.decodeIfPresent([ToolEntry].self, forKey: .tools) ?? []
+        skills = try c.decodeIfPresent([SkillEntry].self, forKey: .skills) ?? []
+        subagents = try c.decodeIfPresent([SubagentEntry].self, forKey: .subagents) ?? []
+        mcpServers = try c.decodeIfPresent([McpServerEntry].self, forKey: .mcpServers) ?? []
+        workflow = try c.decodeIfPresent(WorkflowBlock.self, forKey: .workflow)
+        topReworkedFiles = try c.decodeIfPresent([ReworkedFileEntry].self, forKey: .topReworkedFiles) ?? []
+        pullRequests = try c.decodeIfPresent(PullRequestsBlock.self, forKey: .pullRequests)
+        unpricedModels = try c.decodeIfPresent([UnpricedModelEntry].self, forKey: .unpricedModels) ?? []
+    }
+}
+
+struct ProviderDetail: Codable, Sendable {
+    let id: String
+    let label: String
+    let cost: Double
+    let calls: Int
+    let hasUsage: Bool
+    /// Provider-scoped tokens and sessions for the period. Nil on every CLI up
+    /// to 0.9.23, which never emitted them: absent means "no breakdown", which
+    /// the glance renders as a missing column rather than as zero or as the
+    /// machine-wide figure.
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let sessions: Int?
+    var sessionCountBasis: String? = nil
+    /// Input tokens re-served from the provider's prompt cache for the period,
+    /// accounted separately from `inputTokens` and priced at the cache-read
+    /// rate inside `cost`. Nil on CLIs that predate per-provider cache
+    /// accounting: absent means unknown, never a fabricated zero.
+    let cacheReadTokens: Int?
+    /// Portion of `cost` priced from estimates. Nil on older CLIs and when zero.
+    let estimatedCostUSD: Double?
+
+    init(
+        id: String,
+        label: String,
+        cost: Double,
+        calls: Int,
+        hasUsage: Bool,
+        inputTokens: Int? = nil,
+        outputTokens: Int? = nil,
+        sessions: Int? = nil,
+        sessionCountBasis: String? = nil,
+        cacheReadTokens: Int? = nil,
+        estimatedCostUSD: Double? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.cost = cost
+        self.calls = calls
+        self.hasUsage = hasUsage
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.sessions = sessions
+        self.sessionCountBasis = sessionCountBasis
+        self.cacheReadTokens = cacheReadTokens
+        self.estimatedCostUSD = estimatedCostUSD
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, label, cost, calls, hasUsage, inputTokens, outputTokens, sessions, sessionCountBasis, cacheReadTokens, estimatedCostUSD
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        cost = try c.decode(Double.self, forKey: .cost)
+        calls = try c.decodeIfPresent(Int.self, forKey: .calls) ?? 0
+        // EVERY released CLI omits hasUsage, so the absent case is the common
+        // one, not a legacy edge. Deriving activity from cost there hid every
+        // subscription-backed provider whose period spend is $0 (Hermes, Kimi,
+        // Copilot on an included plan). A provider the payload bothered to list
+        // is one the user has, so absent means visible; the strict signal
+        // applies only when the field is actually present.
+        hasUsage = try c.decodeIfPresent(Bool.self, forKey: .hasUsage) ?? true
+        inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens)
+        outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens)
+        sessions = try c.decodeIfPresent(Int.self, forKey: .sessions)
+        sessionCountBasis = try c.decodeIfPresent(String.self, forKey: .sessionCountBasis)
+        cacheReadTokens = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokens)
+        estimatedCostUSD = try c.decodeIfPresent(Double.self, forKey: .estimatedCostUSD)
+    }
+}
+
+/// Same rule as the CLI (src/format.ts isEstimatedCost): a figure carries the
+/// `~` marker once its estimated portion is at least 1% of it, unless `shown`
+/// (the amount as printed) reads as zero.
+func isEstimatedCost(_ cost: Double, _ estimatedCostUSD: Double?, shown: String) -> Bool {
+    let estimated = estimatedCostUSD ?? 0
+    return estimated > 0 && estimated >= cost * 0.01
+        && shown.contains(where: { ("1"..."9").contains($0) })
+}
+
+enum ProviderVisibility {
+    static func activeKeys(
+        providerDetails: [ProviderDetail],
+        legacyProviders: [String: Double]
+    ) -> Set<String> {
+        if !providerDetails.isEmpty {
+            return Set(providerDetails
+                .filter(\.hasUsage)
+                .flatMap { [$0.id.lowercased(), $0.label.lowercased()] })
+        }
+        return Set(legacyProviders.compactMap { key, cost in
+            cost > 0 ? key.lowercased() : nil
+        })
+    }
+}
+
+struct LocalModelSavingsByModel: Codable, Sendable {
+    let name: String
+    let calls: Int
+    let actualUSD: Double
+    let savingsUSD: Double
+    let baselineModel: String
+    let inputTokens: Int
+    let outputTokens: Int
+}
+
+struct LocalModelSavingsByProvider: Codable, Sendable {
+    let name: String
+    let calls: Int
+    let savingsUSD: Double
+}
+
+struct LocalModelSavings: Codable, Sendable {
+    let totalUSD: Double
+    let calls: Int
+    let byModel: [LocalModelSavingsByModel]
+    let byProvider: [LocalModelSavingsByProvider]
+}
+
+struct ActivityEntry: Codable, Sendable {
+    let name: String
+    let cost: Double
+    let savingsUSD: Double
+    let turns: Int
+    let oneShotRate: Double?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        turns = try c.decode(Int.self, forKey: .turns)
+        oneShotRate = try c.decodeIfPresent(Double.self, forKey: .oneShotRate)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, cost, savingsUSD, turns, oneShotRate
+    }
+}
+
+struct ModelEntry: Codable, Sendable {
+    let name: String
+    let cost: Double
+    let savingsUSD: Double
+    let savingsBaselineModel: String
+    let calls: Int
+    /// Per-model token counts: input, output, cache read (reused input), and
+    /// cache write, kept separate so the two cache flavors are never summed.
+    /// Nil on every CLI up to the token-breakdown release and on any row whose
+    /// contributing legacy data lacked counts: absent means "unknown", which
+    /// renders as a dash — never as zero, and never as a period-wide figure.
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheReadTokens: Int?
+    let cacheWriteTokens: Int?
+    /// Portion of `cost` priced from estimates. Nil on older CLIs.
+    let estimatedCostUSD: Double?
+
+    @MainActor var isEstimated: Bool { isEstimatedCost(cost, estimatedCostUSD, shown: cost.asCompactCurrency()) }
+
+    /// Whether any per-model count arrived. A row with none (legacy payload)
+    /// renders without the secondary token line rather than as a run of dashes.
+    var hasTokenCounts: Bool {
+        inputTokens != nil || outputTokens != nil || cacheReadTokens != nil
+    }
+
+    init(name: String,
+         cost: Double,
+         savingsUSD: Double,
+         savingsBaselineModel: String,
+         calls: Int,
+         inputTokens: Int? = nil,
+         outputTokens: Int? = nil,
+         cacheReadTokens: Int? = nil,
+         cacheWriteTokens: Int? = nil,
+         estimatedCostUSD: Double? = nil) {
+        self.name = name
+        self.cost = cost
+        self.savingsUSD = savingsUSD
+        self.savingsBaselineModel = savingsBaselineModel
+        self.calls = calls
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
+        self.estimatedCostUSD = estimatedCostUSD
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        savingsBaselineModel = try c.decodeIfPresent(String.self, forKey: .savingsBaselineModel) ?? ""
+        calls = try c.decode(Int.self, forKey: .calls)
+        inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens)
+        outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens)
+        cacheReadTokens = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokens)
+        cacheWriteTokens = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokens)
+        estimatedCostUSD = try c.decodeIfPresent(Double.self, forKey: .estimatedCostUSD)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, cost, savingsUSD, savingsBaselineModel, calls
+        case inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, estimatedCostUSD
+    }
+}
+
+struct SessionModelEntry: Codable, Sendable {
+    let name: String
+    let cost: Double
+    let savingsUSD: Double
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, cost, savingsUSD
+    }
+}
+
+struct SessionDetailEntry: Codable, Sendable {
+    let cost: Double
+    let savingsUSD: Double
+    let calls: Int
+    let inputTokens: Int
+    let outputTokens: Int
+    let date: String
+    let models: [SessionModelEntry]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        calls = try c.decode(Int.self, forKey: .calls)
+        inputTokens = try c.decode(Int.self, forKey: .inputTokens)
+        outputTokens = try c.decode(Int.self, forKey: .outputTokens)
+        date = try c.decode(String.self, forKey: .date)
+        models = try c.decodeIfPresent([SessionModelEntry].self, forKey: .models) ?? []
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cost, savingsUSD, calls, inputTokens, outputTokens, date, models
+    }
+}
+
+struct ProjectEntry: Codable, Sendable {
+    let name: String
+    let cost: Double
+    let savingsUSD: Double
+    let sessions: Int
+    let avgCostPerSession: Double?
+    let sessionCountBasis: String?
+    let sessionDetails: [SessionDetailEntry]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        sessions = try c.decode(Int.self, forKey: .sessions)
+        avgCostPerSession = try c.decodeIfPresent(Double.self, forKey: .avgCostPerSession)
+        sessionCountBasis = try c.decodeIfPresent(String.self, forKey: .sessionCountBasis)
+        sessionDetails = try c.decodeIfPresent([SessionDetailEntry].self, forKey: .sessionDetails) ?? []
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, cost, savingsUSD, sessions, avgCostPerSession, sessionCountBasis, sessionDetails
+    }
+}
+
+struct ModelEfficiencyEntry: Codable, Sendable {
+    let name: String
+    let costPerEdit: Double?
+    let oneShotRate: Double?
+}
+
+struct TopSessionEntry: Codable, Sendable {
+    let project: String
+    let cost: Double
+    let savingsUSD: Double
+    let calls: Int
+    let date: String
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        project = try c.decode(String.self, forKey: .project)
+        cost = try c.decode(Double.self, forKey: .cost)
+        savingsUSD = try c.decodeIfPresent(Double.self, forKey: .savingsUSD) ?? 0
+        calls = try c.decode(Int.self, forKey: .calls)
+        date = try c.decode(String.self, forKey: .date)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case project, cost, savingsUSD, calls, date
+    }
+}
+
+struct ToolEntry: Codable, Sendable {
+    let name: String
+    let calls: Int
+}
+
+struct SkillEntry: Codable, Sendable {
+    let name: String
+    let turns: Int
+    let cost: Double
+}
+
+struct SubagentEntry: Codable, Sendable {
+    let name: String
+    let calls: Int
+    let cost: Double
+}
+
+struct McpServerEntry: Codable, Sendable {
+    let name: String
+    let calls: Int
+}
+
+struct OptimizeBlock: Codable, Sendable {
+    let findingCount: Int
+    let savingsUSD: Double
+    let topFindings: [FindingEntry]
+}
+
+struct FindingEntry: Codable, Sendable {
+    let title: String
+    let impact: String
+    let savingsUSD: Double
+}
+
+// MARK: - Empty fallback
+
+extension MenubarPayload {
+    /// Strictly-empty payload. Used as the fallback before real data arrives, so no
+    /// plausible-looking fake numbers leak into the UI.
+    static let empty = MenubarPayload(
+        generated: "",
+        current: CurrentBlock(
+            label: "",
+            cost: 0,
+            calls: 0,
+            sessions: 0,
+            oneShotRate: nil,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheHitPercent: 0,
+            codexCredits: nil,
+            topActivities: [],
+            topModels: [],
+            localModelSavings: LocalModelSavings(totalUSD: 0, calls: 0, byModel: [], byProvider: []),
+            providers: [:],
+            topProjects: [],
+            modelEfficiency: [],
+            topSessions: [],
+            retryTax: RetryTax(totalUSD: 0, retries: 0, editTurns: 0, byModel: []),
+            routingWaste: RoutingWaste(totalSavingsUSD: 0, baselineModel: "", baselineCostPerEdit: 0, byModel: []),
+            tools: [],
+            skills: [],
+            subagents: [],
+            mcpServers: []
+        ),
+        optimize: OptimizeBlock(findingCount: 0, savingsUSD: 0, topFindings: []),
+        history: HistoryBlock(daily: []),
+        combined: nil,
+        claudeConfigs: nil
+    )
+}

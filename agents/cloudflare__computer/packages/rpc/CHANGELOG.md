@@ -1,0 +1,52 @@
+# @cloudflare/computer-rpc
+
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @cloudflare/dofs@0.4.1
+
+## 0.4.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @cloudflare/dofs@0.4.0
+
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies [[`e5e28a7`](https://github.com/cloudflare/computer/commit/e5e28a79d74f1e173006193bf3eeb0d990c98930)]:
+  - @cloudflare/dofs@0.3.2
+
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [[`7ce8259`](https://github.com/cloudflare/computer/commit/7ce8259324d40d32e7b2db9d371ea5b19f4c8f63), [`e6a92c5`](https://github.com/cloudflare/computer/commit/e6a92c50cb53997bd601bdce0563b96276d0f8fc), [`e6a92c5`](https://github.com/cloudflare/computer/commit/e6a92c50cb53997bd601bdce0563b96276d0f8fc), [`e6a92c5`](https://github.com/cloudflare/computer/commit/e6a92c50cb53997bd601bdce0563b96276d0f8fc), [`ef8cd11`](https://github.com/cloudflare/computer/commit/ef8cd11040b222875f1d04e7cfd6553068e07bb7)]:
+  - @cloudflare/dofs@0.3.1
+
+## 0.3.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @cloudflare/dofs@0.3.0
+
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @cloudflare/dofs@0.2.1
+
+## 0.2.0
+
+### Patch Changes
+
+- [#77](https://github.com/cloudflare/computer/pull/77) [`5062158`](https://github.com/cloudflare/computer/commit/50621582410c8933d313eddf8fb362596ffd9d29) Thanks [@aron-cf](https://github.com/aron-cf)! - Fix git diff/status/log edge cases, batch sync hash probes within Durable Object SQLite limits, and count tracked RPC targets by identity.
+
+- Updated dependencies [[`eda0ddc`](https://github.com/cloudflare/computer/commit/eda0ddc3769fe59eec0b64dc8cb163af54ae869e), [`adbf497`](https://github.com/cloudflare/computer/commit/adbf4978e14769a7bb452d692260c76032ec42b8), [`8758b51`](https://github.com/cloudflare/computer/commit/8758b51c8891c211dddd1903d2ee2d12a75ac7ff), [`5062158`](https://github.com/cloudflare/computer/commit/50621582410c8933d313eddf8fb362596ffd9d29)]:
+  - @cloudflare/dofs@0.2.0

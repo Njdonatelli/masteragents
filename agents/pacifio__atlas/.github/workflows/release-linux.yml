@@ -1,0 +1,262 @@
+name: Release Linux
+
+on:
+  push:
+    tags:
+      - 'alpha-*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (leave empty to detect or read from package.json)'
+        required: false
+        default: ''
+      tag:
+        description: 'Release tag name (leave empty to match git tag or alpha-<version>)'
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # sccache, as in ci.yml (which explains why it sits alongside rust-cache).
+  # Workflow-wide is safe here, unlike ci.yml: the one job installs sccache
+  # before anything runs cargo, and the Arch package's `docker run` does not
+  # inherit the runner's environment.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: 'true'
+  # Only a manual run on the default branch writes, for both sccache and
+  # rust-cache (`save-if` below). A run can restore only entries from its own
+  # ref or the default branch's. A release is usually a tag push, and the next
+  # release is a different tag, so whatever a tag run saved would never be
+  # restored and would only evict CI's entries from the shared 10 GB budget
+  # (see "Cache budget" in ci.yml). This job's x86-64 release-profile units
+  # share nothing with CI's aarch64 dev-profile ones, so the main-branch
+  # entries a tag run can read come from a manual run here, never from CI.
+  SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'READ_WRITE' || 'READ_ONLY' }}
+
+jobs:
+  build-linux:
+    name: Build Linux Packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Extract release version
+        id: meta
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            RAW_VER="$INPUT_VERSION"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            RAW_VER="${GITHUB_REF_NAME}"
+          else
+            RAW_VER=$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')
+          fi
+          # Strip tag prefixes to get pure semver
+          VERSION="${RAW_VER#alpha-}"
+          VERSION="${VERSION#exp-}"
+          VERSION="${VERSION#v}"
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="alpha-${VERSION}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building Atlas ${VERSION} for tag ${TAG}"
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libglib2.0-dev \
+            bubblewrap \
+            rpm \
+            squashfs-tools
+
+      # Bun, Node and Rust at the versions mise.toml and rust-toolchain.toml
+      # pin: a release is built with exactly what CI tested.
+      - name: Setup Bun and Node
+        uses: jdx/mise-action@v2
+
+      - name: Setup Rust toolchain
+        run: rustup toolchain install
+
+      # Before rust-cache: with RUSTC_WRAPPER set, cargo invokes sccache even
+      # to probe `rustc -vV`.
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          save-if: ${{ env.SCCACHE_GHA_RW_MODE == 'READ_WRITE' }}
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Synchronize version across manifests
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const ver = process.env.VERSION;
+            if (!ver) process.exit(0);
+
+            // Update package.json
+            const pkgPath = "package.json";
+            if (fs.existsSync(pkgPath)) {
+              const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+              pkg.version = ver;
+              fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+              console.log("Updated package.json version to " + ver);
+            }
+
+            // Update src-tauri/tauri.conf.json
+            const tauriConfPath = "src-tauri/tauri.conf.json";
+            if (fs.existsSync(tauriConfPath)) {
+              const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, "utf8"));
+              tauriConf.version = ver;
+              fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + "\n");
+              console.log("Updated tauri.conf.json version to " + ver);
+            }
+
+            // Update src-tauri/Cargo.toml
+            const cargoPath = "src-tauri/Cargo.toml";
+            if (fs.existsSync(cargoPath)) {
+              let cargo = fs.readFileSync(cargoPath, "utf8");
+              cargo = cargo.replace(/^version = ".*"/m, `version = "${ver}"`);
+              fs.writeFileSync(cargoPath, cargo);
+              console.log("Updated Cargo.toml version to " + ver);
+            }
+          '
+
+      - name: Expand swap space to prevent runner OOM
+        run: |
+          sudo fallocate -l 10G /swapfile_extra || sudo dd if=/dev/zero of=/swapfile_extra bs=1M count=10240
+          sudo chmod 600 /swapfile_extra
+          sudo mkswap /swapfile_extra
+          sudo swapon /swapfile_extra
+          free -h
+
+      - name: Build frontend & Tauri Linux packages (deb, rpm, AppImage)
+        env:
+          POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+        run: |
+          bun run build:app:linux -- --bundles appimage
+
+      - name: Find and verify built binary
+        id: find_bin
+        run: |
+          SEARCH_DIRS=()
+          [ -d "target" ] && SEARCH_DIRS+=("target")
+          [ -d "src-tauri/target" ] && SEARCH_DIRS+=("src-tauri/target")
+          BIN_PATH=$(find "${SEARCH_DIRS[@]}" -type f -path "*/release/atlas" ! -path "*/incremental/*" | head -n 1)
+          if [ -z "$BIN_PATH" ]; then
+            echo "Error: compiled atlas binary not found" >&2
+            exit 1
+          fi
+          echo "Found atlas binary at: ${BIN_PATH}"
+          echo "bin_path=${BIN_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate standalone tarball, licenses, icons & AUR PKGBUILD
+        env:
+          ATLAS_BIN: ${{ steps.find_bin.outputs.bin_path }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          ./scripts/package-linux.sh x86_64
+
+      - name: Build Arch Linux package (.pkg.tar.zst) via Docker
+        run: |
+          docker run --rm --ipc=host -v "${PWD}:/workspace" -w /workspace archlinux:latest bash -c '
+            set -euo pipefail
+            pacman-key --init && pacman-key --populate archlinux || true
+            pacman -Sy --noconfirm archlinux-keyring || true
+            pacman -Syu --noconfirm base-devel pacman-contrib zstd
+            useradd -m builder
+            chown -R builder:builder /workspace/dist/release-linux
+            su builder -c "cd /workspace/dist/release-linux/aur-tryatlas-bin && makepkg -f --nodeps"
+            cp /workspace/dist/release-linux/aur-tryatlas-bin/*.pkg.tar.zst /workspace/dist/release-linux/
+            chmod -R a+rw /workspace/dist/release-linux
+          '
+
+      - name: Collect release artifacts
+        run: |
+          mkdir -p dist/artifacts
+          SEARCH_DIRS=()
+          [ -d "target" ] && SEARCH_DIRS+=("target")
+          [ -d "src-tauri/target" ] && SEARCH_DIRS+=("src-tauri/target")
+          # Copy standalone tarball
+          cp dist/release-linux/*.tar.gz dist/artifacts/
+          # Copy Arch Linux package. `!debug` in the PKGBUILD stops makepkg
+          # splitting out an empty debug package; drop one if it ever does, and
+          # keep the plain `cp` so a missing package still fails the job.
+          rm -f dist/release-linux/*-debug-*.pkg.tar.zst
+          cp dist/release-linux/*.pkg.tar.zst dist/artifacts/
+          # Copy AUR PKGBUILD for convenience
+          cp dist/release-linux/aur-tryatlas-bin/PKGBUILD dist/artifacts/PKGBUILD-tryatlas-bin
+          # Copy conflict-free Debian and RPM packages generated by package-linux.sh
+          cp dist/release-linux/*.deb dist/artifacts/ 2>/dev/null || true
+          cp dist/release-linux/*.rpm dist/artifacts/ 2>/dev/null || true
+          # Fallback to Tauri deb/rpm bundles if custom ones were not generated
+          if ! ls dist/artifacts/*.deb >/dev/null 2>&1; then
+            find "${SEARCH_DIRS[@]}" -type f -name "*.deb" -exec cp -t dist/artifacts/ {} +
+          fi
+          if ! ls dist/artifacts/*.rpm >/dev/null 2>&1; then
+            find "${SEARCH_DIRS[@]}" -type f -name "*.rpm" -exec cp -t dist/artifacts/ {} +
+          fi
+          # Copy AppImage from Tauri bundles and normalize name to tryatlas package convention
+          find "${SEARCH_DIRS[@]}" -type f -name "*.AppImage" -exec cp -t dist/artifacts/ {} +
+          for appimage in dist/artifacts/*Atlas*.AppImage; do
+            if [ -f "$appimage" ]; then
+              mv "$appimage" "${appimage//Atlas/tryatlas}"
+            fi
+          done
+
+          cd dist/artifacts
+          rm -f SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name "SHA256SUMS.txt" -exec sha256sum {} + | sort -k2 > SHA256SUMS.txt
+          echo "=== Release Artifacts ==="
+          ls -lh
+          echo "=== Checksums ==="
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          # When a manual run names a tag that does not exist yet, create it on
+          # the commit just built, not on the default branch's head.
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

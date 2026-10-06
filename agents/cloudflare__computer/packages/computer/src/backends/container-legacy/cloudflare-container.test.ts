@@ -1,0 +1,709 @@
+// LegacyContainerBackend tests — exercise the lifecycle
+// plumbing against an in-process fake ILegacyWorkspaceContainerAPI.
+//
+// The successful connect() path constructs a WebSocketPair, which
+// is a workerd global not available under the vitest node runner.
+// These tests cover the paths that bail before the upgrade (port
+// never opens, /connect non-2xx, /api upgrade timeout), the
+// handleFetch input validation, and the factory + workspace-ref
+// plumbing. The full happy-path round-trip is covered by the live
+// example.
+
+import { describe, expect, test, vi } from "vitest";
+
+import { WorkspaceTransportError } from "../../transport-failure.js";
+import { LegacyContainerBackend } from "./cloudflare-container.js";
+import type { ILegacyWorkspaceContainerAPI, WorkspaceRef } from "./container-host.js";
+
+interface FakeHostOptions {
+  // Status the container returns for an unauthenticated request to a
+  // gated route. Defaults to 401, meaning the secret is enforced.
+  authProbeStatus?: number;
+  // Accept the probe and never answer it, to prove the request is bounded.
+  authProbeHang?: boolean;
+  healthy?: boolean;
+  // Health probe sequence: each connect() reads from the head of
+  // this array. true = answer 200, false = throw "connection
+  // refused". A single `healthy` flag still works for tests that
+  // don't care about transitions.
+  healthSequence?: boolean[];
+  connectStatus?: number;
+  start?: () => Promise<void>;
+  intercept?: () => Promise<void>;
+  restart?: () => Promise<void>;
+  // Pre-set a prior exit reason so connect()'s pre-flight
+  // exitInfo() check observes it.
+  priorExit?: { exitedAt: number; reason: string } | null;
+}
+
+interface FakeHost {
+  host: ILegacyWorkspaceContainerAPI;
+  calls: { name: string; args: unknown[] }[];
+  connectBody?: Record<string, unknown>;
+  connectAuthorization?: string | null;
+  clientSecret?: string;
+  startEnv?: Record<string, string>;
+  enableInternet?: boolean;
+  interceptedHost?: string;
+  interceptedWorkspace?: WorkspaceRef;
+  gatewayWorkspace?: WorkspaceRef;
+  gatewayToken?: string;
+  running: boolean;
+  exit: { exitedAt: number; reason: string } | null;
+  runtimeId: string | null;
+  simulateExit(reason: string): void;
+}
+
+function makeFakeHost(opts: FakeHostOptions = {}): FakeHost {
+  const healthSequence = opts.healthSequence?.slice();
+  const defaultHealthy = opts.healthy ?? true;
+  const connectStatus = opts.connectStatus ?? 200;
+  const calls: { name: string; args: unknown[] }[] = [];
+  const state: FakeHost = {
+    calls,
+    running: false,
+    exit: opts.priorExit ?? null,
+    runtimeId: null,
+    simulateExit(reason: string) {
+      state.exit = { exitedAt: Date.now(), reason };
+      state.running = false;
+    },
+  } as FakeHost;
+
+  function nextHealthy(): boolean {
+    if (healthSequence && healthSequence.length > 0) {
+      return healthSequence.shift() ?? defaultHealthy;
+    }
+    return defaultHealthy;
+  }
+
+  state.host = {
+    async start(spec) {
+      const { env, enableInternet } = spec;
+      calls.push({ name: "start", args: [env, enableInternet] });
+      state.startEnv = env;
+      state.enableInternet = enableInternet;
+      await opts.start?.();
+      if (!state.running) state.runtimeId = crypto.randomUUID();
+      state.clientSecret ??= "00112233445566778899aabbccddeeff";
+      state.running = true;
+      // A successful start clears any prior exit, matching
+      // LegacyWorkspaceContainerAPI.start.
+      state.exit = null;
+      return {
+        runtimeId: state.runtimeId ?? "missing-runtime",
+        clientSecret: state.clientSecret ?? "unset",
+        outcome: "launched",
+      };
+    },
+    async interceptOutboundHttp(host, ref) {
+      calls.push({ name: "interceptOutboundHttp", args: [host, ref] });
+      await opts.intercept?.();
+      state.interceptedHost = host;
+      state.interceptedWorkspace = ref;
+    },
+    async interceptAllOutboundHttp(ref, token) {
+      calls.push({ name: "interceptAllOutboundHttp", args: [ref, token] });
+      state.gatewayWorkspace = ref;
+      state.gatewayToken = token;
+    },
+    async fetchPort(port, input, init) {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      calls.push({ name: "fetchPort", args: [port, url.pathname, request.method] });
+      if (url.pathname === "/health") {
+        if (!nextHealthy()) throw new Error("connection refused");
+        return new Response(null, { status: 200 });
+      }
+      if (url.pathname === "/api") {
+        // An enforcing container refuses an unauthenticated request here.
+        // authProbeStatus models one that does not; authProbeHang models
+        // one that accepts the connection and never answers.
+        if (opts.authProbeHang) {
+          await new Promise((resolve) => {
+            init?.signal?.addEventListener("abort", resolve, { once: true });
+          });
+          throw new Error("aborted");
+        }
+        return new Response(null, { status: opts.authProbeStatus ?? 401 });
+      }
+      if (url.pathname === "/connect") {
+        state.connectBody = (await request
+          .clone()
+          .json()
+          .catch(() => undefined)) as Record<string, unknown> | undefined;
+        state.connectAuthorization = request.headers.get("authorization");
+        if (connectStatus !== 200) {
+          return new Response(`/connect ${connectStatus}`, { status: connectStatus });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`unexpected port path: ${url.pathname}`);
+    },
+    port() {
+      throw new Error("cross-boundary Fetchers should not be used by LegacyContainerBackend");
+    },
+    async restart(spec) {
+      const { env, enableInternet } = spec;
+      calls.push({ name: "restart", args: [env, enableInternet] });
+      if (opts.restart) {
+        await opts.restart();
+      }
+      state.running = true;
+      state.exit = null;
+      state.runtimeId = crypto.randomUUID();
+      state.clientSecret ??= "00112233445566778899aabbccddeeff";
+      return {
+        runtimeId: state.runtimeId,
+        clientSecret: state.clientSecret,
+        outcome: "launched",
+      };
+    },
+    async setInactivityTimeout(durationMs: number) {
+      calls.push({ name: "setInactivityTimeout", args: [durationMs] });
+    },
+    async status() {
+      calls.push({ name: "status", args: [] });
+      return { running: state.running, exit: state.exit };
+    },
+    async exitInfo() {
+      calls.push({ name: "exitInfo", args: [] });
+      return state.exit;
+    },
+  } satisfies ILegacyWorkspaceContainerAPI;
+  return state;
+}
+
+const fakeWorkspace: WorkspaceRef = { binding: "TestDO", id: "abc123" };
+
+describe("LegacyContainerBackend", () => {
+  test("connect() classifies a container start failure as transport", async () => {
+    const platformError = new Error(
+      "There is no container instance that can be provided to this Durable Object, try again later",
+    );
+    const fake = makeFakeHost({
+      start: async () => {
+        throw platformError;
+      },
+    });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceTransportError);
+    expect(error).toMatchObject({ cause: platformError });
+    expect(String(error)).toMatch(/stage=start/);
+  });
+
+  test("connect() classifies egress interception failure as transport", async () => {
+    const platformError = new Error("container is not ready for egress interception");
+    const fake = makeFakeHost({
+      intercept: async () => {
+        throw platformError;
+      },
+    });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceTransportError);
+    expect(error).toMatchObject({ cause: platformError });
+    expect(String(error)).toMatch(/stage=egress/);
+  });
+
+  test("connect() throws when the container port never opens", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+      restartAttempts: 0,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceTransportError);
+    expect(error).toMatchObject({ cause: expect.any(Error) });
+    expect(String(error)).toMatch(/stage=health.*port=8080/);
+
+    const names = fake.calls.map((c) => c.name);
+    expect(names).toContain("start");
+    expect(names).toContain("interceptOutboundHttp");
+    expect(fake.interceptedHost).toBe("computer.internal");
+    expect(fake.interceptedWorkspace).toEqual(fakeWorkspace);
+  });
+
+  test("blocks ambient egress by default", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+
+    await expect(backend.connect()).rejects.toThrow();
+
+    expect(fake.enableInternet).toBe(false);
+  });
+
+  test("enables direct ambient egress", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+      egress: { mode: "direct" },
+    });
+
+    await expect(backend.connect()).rejects.toThrow();
+
+    expect(fake.enableInternet).toBe(true);
+  });
+
+  test("restores tokenized egress callbacks before calling the gateway", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    let gatewayRequest: Request | undefined;
+    const gateway = {
+      fetch: vi.fn(async (request: Request) => {
+        gatewayRequest = request;
+        return new Response(request.url);
+      }),
+    } as unknown as Fetcher;
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+      egress: { mode: "http-gateway", gateway },
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    const request = new Request("https://workspace.internal/api", {
+      method: "POST",
+      body: "payload",
+      headers: {
+        "x-workspace-egress-token": fake.gatewayToken ?? "",
+        "x-workspace-egress-url": "https://api.example.test/data?format=json",
+      },
+    });
+
+    const response = await backend.handleFetch(request);
+
+    expect(fake.gatewayWorkspace).toEqual(fakeWorkspace);
+    expect(await response.text()).toBe("https://api.example.test/data?format=json");
+    expect(gatewayRequest?.method).toBe("POST");
+    expect(await gatewayRequest?.text()).toBe("payload");
+    expect(gatewayRequest?.headers.get("x-workspace-egress-token")).toBeNull();
+    expect(gatewayRequest?.headers.get("x-workspace-egress-url")).toBeNull();
+    expect(gateway.fetch).toHaveBeenCalledOnce();
+  });
+
+  test("rejects tokenized egress callbacks without a valid original URL", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const gateway = {
+      fetch: vi.fn(async () => new Response("forwarded")),
+    } as unknown as Fetcher;
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+      egress: { mode: "http-gateway", gateway },
+    });
+    await expect(backend.connect()).rejects.toThrow();
+
+    const response = await backend.handleFetch(
+      new Request("https://workspace.internal/api", {
+        headers: {
+          "x-workspace-egress-token": fake.gatewayToken ?? "",
+          "x-workspace-egress-url": "ftp://api.example.test/data",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(gateway.fetch).not.toHaveBeenCalled();
+  });
+
+  test("rejects container egress callbacks with the wrong token", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const gateway = {
+      fetch: vi.fn(async () => new Response("forwarded")),
+    } as unknown as Fetcher;
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+      egress: { mode: "http-gateway", gateway },
+    });
+    await expect(backend.connect()).rejects.toThrow();
+
+    const response = await backend.handleFetch(
+      new Request("https://api.example.test/data", {
+        headers: { "x-workspace-egress-token": "wrong" },
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(gateway.fetch).not.toHaveBeenCalled();
+  });
+
+  test("egressHost option overrides the default", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      egressHost: "computerd.local",
+      connectTimeoutMs: 300,
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    expect(fake.interceptedHost).toBe("computerd.local");
+  });
+
+  test("containerEnv option merges onto the start() env", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      containerEnv: { CUSTOM: "1", PORT: "9000" },
+      connectTimeoutMs: 300,
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    expect(fake.startEnv?.CUSTOM).toBe("1");
+    // Caller-supplied value wins over the default.
+    expect(fake.startEnv?.PORT).toBe("9000");
+    // Defaults still flow through.
+    expect(fake.startEnv?.MOUNT_POINT).toBe("/workspace");
+  });
+
+  test("container factory is invoked per connect()", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const factory = vi.fn(() => ({ getWorkspaceContainer: () => fake.host }));
+    const backend = new LegacyContainerBackend({
+      container: factory,
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    await expect(backend.connect()).rejects.toThrow();
+    // Two failed dials → two factory invocations. The cached
+    // handle only short-circuits on success.
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  test("async container factory is awaited", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: async () => {
+        await Promise.resolve();
+        return { getWorkspaceContainer: () => fake.host };
+      },
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    expect(fake.calls.map((c) => c.name)).toContain("start");
+  });
+
+  test("connect() throws when /connect returns non-2xx", async () => {
+    const fake = makeFakeHost({ connectStatus: 502 });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceTransportError);
+    expect(String(error)).toMatch(/POST \/connect returned 502/);
+  });
+
+  test("connect() names the egress base and both paths in the /connect body", async () => {
+    // The container assembles no host paths of its own, so the
+    // request has to carry them. A missing field would leave the
+    // daemon with nothing to dial.
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+
+    await backend.connect().catch(() => {});
+
+    expect(fake.connectBody).toMatchObject({
+      base: "http://computer.internal",
+      health: "/health",
+      api: "/api",
+    });
+    expect(typeof fake.connectBody?.healthTimeoutMs).toBe("number");
+    // The daemon refuses an unauthorized request once it has a secret,
+    // so the bearer token travels with the dial-back instruction.
+    expect(fake.connectAuthorization).toBe(`Bearer ${fake.clientSecret}`);
+  });
+
+  test("connect() fails when the container accepts an unauthenticated request", async () => {
+    // An image predating RPC_CLIENT_SECRET ignores the variable and serves
+    // everything. Connecting anyway would hand a session to a container
+    // that is not authorizing anyone, so this refuses instead.
+    const fake = makeFakeHost({ authProbeStatus: 200 });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(WorkspaceTransportError);
+    expect(String(error)).toMatch(/stage=auth/);
+    expect(String(error)).toMatch(/without authorization/);
+    expect(String(error)).toMatch(/recycled/);
+  });
+
+  test("connect() gets past the check when the container refuses an unauthenticated request", async () => {
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+
+    // It still fails, but on the upgrade rather than the auth check: there
+    // is no WebSocketPair in this environment.
+    expect(String(error)).not.toMatch(/stage=auth/);
+    expect(fake.calls.map((c) => c.name)).toContain("fetchPort");
+  });
+
+  test("connect() does not hang when the container never answers the check", async () => {
+    // The probe is on the critical path, so an unbounded request would
+    // wedge the connect past its own timeout.
+    const fake = makeFakeHost({ authProbeHang: true });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+      healthProbeTimeoutMs: 100,
+    });
+
+    const started = Date.now();
+    await backend.connect().catch(() => {});
+
+    // A probe that cannot answer is inconclusive, so the connect carries
+    // on and fails later on the upgrade, well inside its own budget.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("connect() throws a transport error when the /api upgrade never arrives", async () => {
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+
+    const error = await backend.connect().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceTransportError);
+    expect(String(error)).toMatch(/\/api upgrade did not arrive/);
+  });
+
+  test("handleFetch rejects non-/api paths", async () => {
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+    });
+    const res = await backend.handleFetch(new Request("http://computer.internal/other"));
+    expect(res.status).toBe(404);
+  });
+
+  test("handleFetch rejects missing upgrade header", async () => {
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+    });
+    const res = await backend.handleFetch(new Request("http://computer.internal/api"));
+    expect(res.status).toBe(400);
+  });
+
+  test("handleFetch refuses a dial-back that does not present the secret", async () => {
+    // The armed slot hands its session to whoever arrives first, and this
+    // endpoint is reachable from inside the container. Without a token,
+    // any command the workspace runs could take the daemon's place.
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+    // connect() records the secret and arms the slot; it then fails on the
+    // upgrade, which is what leaves the slot open for these requests.
+    await backend.connect().catch(() => {});
+    const upgrade = { upgrade: "websocket" };
+
+    const none = await backend.handleFetch(
+      new Request("http://computer.internal/api", { headers: upgrade }),
+    );
+    expect(none.status).toBe(401);
+    expect(none.headers.get("www-authenticate")).toBe("Bearer");
+
+    const wrong = await backend.handleFetch(
+      new Request("http://computer.internal/api", {
+        headers: { ...upgrade, authorization: `Bearer ${"f".repeat(32)}` },
+      }),
+    );
+    expect(wrong.status).toBe(401);
+
+    const shortToken = await backend.handleFetch(
+      new Request("http://computer.internal/api", {
+        headers: { ...upgrade, authorization: "Bearer short" },
+      }),
+    );
+    expect(shortToken.status).toBe(401);
+
+    const otherScheme = await backend.handleFetch(
+      new Request("http://computer.internal/api", {
+        headers: { ...upgrade, authorization: `Basic ${fake.clientSecret}` },
+      }),
+    );
+    expect(otherScheme.status).toBe(401);
+  });
+
+  test("handleFetch accepts a dial-back presenting the secret, in any scheme case", async () => {
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+    await backend.connect().catch(() => {});
+
+    // WebSocketPair does not exist outside workerd, so getting past the
+    // check is what is observable here: it fails constructing the pair
+    // rather than answering 401.
+    for (const scheme of ["Bearer", "bearer", "BEARER"]) {
+      const res = await backend
+        .handleFetch(
+          new Request("http://computer.internal/api", {
+            headers: { upgrade: "websocket", authorization: `${scheme} ${fake.clientSecret}` },
+          }),
+        )
+        .catch(() => null);
+      expect(res?.status, scheme).not.toBe(401);
+    }
+  });
+
+  test("connect() consults host.exitInfo() before host.start()", async () => {
+    const fake = makeFakeHost();
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+      restartAttempts: 0,
+    });
+    // Doesn't matter that this rejects — we just want to observe
+    // the call order.
+    await backend.connect().catch(() => undefined);
+    const names = fake.calls.map((c) => c.name);
+    const exitIdx = names.indexOf("exitInfo");
+    const startIdx = names.indexOf("start");
+    expect(exitIdx).toBeGreaterThanOrEqual(0);
+    expect(startIdx).toBeGreaterThanOrEqual(0);
+    expect(exitIdx).toBeLessThan(startIdx);
+  });
+
+  test("connect() surfaces a prior exit reason in the stage-tagged error", async () => {
+    const fake = makeFakeHost({
+      healthy: false,
+      priorExit: { exitedAt: Date.now() - 5_000, reason: "OOM killed" },
+    });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+      restartAttempts: 0,
+    });
+    const err = await backend.connect().then(
+      () => undefined,
+      (e: Error) => e,
+    );
+    expect(String(err)).toMatch(/stage=health/);
+    expect(String(err)).toMatch(/priorExit="OOM killed"/);
+  });
+
+  test("connect() restarts the host when initial readiness fails and recovers", async () => {
+    // First attempt drains all probes as failures; restart() runs;
+    // the second attempt's very first probe answers healthy.
+    // connect() still fails at the /api upgrade (no WebSocketPair
+    // under node) — the point is that readiness recovered after
+    // restart and we reached the /connect POST and /api upgrade.
+    const fake = makeFakeHost({
+      healthSequence: [
+        // First attempt — enough failures to exhaust the budget.
+        false,
+        false,
+        false,
+        false,
+        false,
+        // Restart, then second attempt: first probe is healthy.
+        true,
+      ],
+    });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 2000,
+      restartAttempts: 1,
+    });
+    await expect(backend.connect()).rejects.toThrow(/stage=ws/);
+    const names = fake.calls.map((c) => c.name);
+    expect(names.filter((n) => n === "start")).toHaveLength(1);
+    expect(names.filter((n) => n === "restart")).toHaveLength(1);
+    // /connect was reached after restart succeeded.
+    const paths = fake.calls.filter((c) => c.name === "fetchPort").map((c) => c.args[1] as string);
+    expect(paths).toContain("/connect");
+  });
+
+  test("connect() surfaces stage='health' when readiness exhausts all attempts", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 800,
+      restartAttempts: 1,
+    });
+    const err = await backend.connect().then(
+      () => undefined,
+      (e: Error) => e,
+    );
+    expect(err).toBeDefined();
+    const msg = String(err);
+    expect(msg).toMatch(/stage=health/);
+    expect(msg).toMatch(/attempts?=2/);
+    expect(msg).toMatch(/port=8080/);
+    // restart was attempted before giving up.
+    expect(fake.calls.some((c) => c.name === "restart")).toBe(true);
+  });
+
+  test("connect() reports stage='health' when restartAttempts=0 and probe never succeeds", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new LegacyContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+      restartAttempts: 0,
+    });
+    const err = await backend.connect().then(
+      () => undefined,
+      (e: Error) => e,
+    );
+    expect(String(err)).toMatch(/stage=health/);
+    // No restart attempt.
+    expect(fake.calls.some((c) => c.name === "restart")).toBe(false);
+  });
+});

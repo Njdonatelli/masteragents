@@ -1,0 +1,26 @@
+/target*
+/dist/
+/docs/inner
+/.vscode
+/.codex
+/.claude
+/.codex-tmp
+/node_modules
+/tmp
+/vendor/*
+!/vendor/v8-152.2.0/
+!/vendor/v8-152.2.0/**
+!/vendor/deno_v8-0.3.0/
+!/vendor/deno_v8-0.3.0/**
+!/vendor/xml5ever-0.39.0/
+!/vendor/xml5ever-0.39.0/**
+/.moli
+__pycache__
+*.pyc
+/moli-playground/chatgpt/.profile/
+
+# Accidental nested benchmark output when moli-benchmark is run from its
+# own directory with a repo-relative output path.
+/moli-benchmark/moli-benchmark/
+
+node_modules
