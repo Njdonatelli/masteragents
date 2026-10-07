@@ -60,9 +60,40 @@ Curated monorepo containing source code and architectures of trending AI and cod
 | 49 | [akitaonrails/ai-memory](https://github.com/akitaonrails/ai-memory) | ⭐ 8,884 | 2026-05-21 | [`agents/akitaonrails__ai-memory`](agents/akitaonrails__ai-memory) | Solution for long term memory for agent coding CLIs and to facilitate handoff between different agent vendors |
 | 50 | [CoreBunch/Instatic](https://github.com/CoreBunch/Instatic) | ⭐ 8,873 | 2026-04-30 | [`agents/CoreBunch__Instatic`](agents/CoreBunch__Instatic) | The open-source alternative to Webflow, Framer and WordPress. Agentic self-hosted visual CMS outputting clean static pages. Users, roles, plugins, content, database, it's all there.  |
 
-## Integration with Antigravity (`agy`)
+## Installation
 
-You can import or reference any agent pattern or skill from `agents/` in your Antigravity workflows or Claude Code sessions.
+### Antigravity CLI (`agy`)
+Install the plugin directly using the Antigravity CLI:
+```bash
+agy plugin install /path/to/masteragents/plugins/masteragents
+```
+Or use the automated script:
+```bash
+python3 scripts/install_plugins.py
+```
+Verify installed agents:
+```bash
+agy agents
+```
+
+### Claude Code (`claude`)
+Add the marketplace and install the plugin:
+```bash
+claude plugin marketplace add /path/to/masteragents
+claude plugin install masteragents@masteragents
+```
+Verify installed plugins:
+```bash
+claude plugin list
+```
+
+## Using Agents
+
+Once installed, all 50 specialized agents are available across your CLI sessions:
+- In Antigravity CLI: `agy --agent <agent-name>` or invoke as subagents.
+- In Claude Code: `claude --agent <agent-name>` or reference in chat.
+- All complete source codes and architectures are locally inspectable in `agents/`.
 
 ## License
 Individual agents in `agents/` retain their respective upstream licenses.
+

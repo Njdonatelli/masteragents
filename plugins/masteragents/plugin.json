@@ -1,0 +1,20 @@
+{
+  "name": "masteragents",
+  "description": "Curated library of 50 top AI and coding agents (<6 months, stars >20) with complete source code, architectures, and executable agent definitions.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Nicolas Donatelli",
+    "url": "https://github.com/Njdonatelli"
+  },
+  "homepage": "https://github.com/Njdonatelli/masteragents",
+  "repository": "https://github.com/Njdonatelli/masteragents",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "coding-agents",
+    "ai-agents",
+    "architecture",
+    "productivity",
+    "engineering"
+  ]
+}

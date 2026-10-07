@@ -1,0 +1,34 @@
+{
+  "name": "masteragents",
+  "owner": {
+    "name": "Nicolas Donatelli",
+    "url": "https://github.com/Njdonatelli"
+  },
+  "description": "Personal hosted marketplace of 50 AI and coding agents. Install once, access every agent across your environment.",
+  "homepage": "https://github.com/Njdonatelli/masteragents",
+  "repository": "https://github.com/Njdonatelli/masteragents",
+  "metadata": {
+    "description": "Personal hosted marketplace of 50 AI and coding agents.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "masteragents",
+      "source": "./plugins/masteragents",
+      "description": "50 high-impact AI coding agents and architectures.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Nicolas Donatelli",
+        "url": "https://github.com/Njdonatelli"
+      },
+      "keywords": [
+        "agents",
+        "coding-agents",
+        "ai-agents",
+        "library",
+        "productivity"
+      ],
+      "category": "productivity"
+    }
+  ]
+}
