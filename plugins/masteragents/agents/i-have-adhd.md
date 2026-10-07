@@ -1,7 +1,7 @@
 ---
 name: i-have-adhd
 description: >-
-  A skill to stop your coding agent from burying the answer. ADHD-friendly output.
+  Enforces concise, executive-summary outputs with answers front-loaded and conversational filler stripped.
 ---
 
 # i-have-adhd Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **i-have-adhd** agent (upstream repository: [`ayghri/i-have-adhd`](https://github.com/ayghri/i-have-adhd), ⭐ 54,375).
 
 ## Overview & Specialization
-A skill to stop your coding agent from burying the answer. ADHD-friendly output.
+Enforces concise, executive-summary outputs with answers front-loaded and conversational filler stripped.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

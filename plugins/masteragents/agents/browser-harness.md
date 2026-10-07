@@ -1,7 +1,7 @@
 ---
 name: browser-harness
 description: >-
-  Browser Harness | Self-healing harness that enables LLMs to complete any task.
+  Self-healing browser execution harness for resilient multi-step web automation and DOM manipulation.
 ---
 
 # browser-harness Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **browser-harness** agent (upstream repository: [`browser-use/browser-harness`](https://github.com/browser-use/browser-harness), ⭐ 18,313).
 
 ## Overview & Specialization
-Browser Harness | Self-healing harness that enables LLMs to complete any task.
+Self-healing browser execution harness for resilient multi-step web automation and DOM manipulation.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

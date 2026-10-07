@@ -1,7 +1,7 @@
 ---
 name: jev-ultrafast
 description: >-
-  Fastest and cheapest web agent
+  Low-latency, lightweight web navigation agent for fast website inspection and form submission.
 ---
 
 # jev-ultrafast Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **jev-ultrafast** agent (upstream repository: [`browser-use/jev-ultrafast`](https://github.com/browser-use/jev-ultrafast), ⭐ 22,196).
 
 ## Overview & Specialization
-Fastest and cheapest web agent
+Low-latency, lightweight web navigation agent for fast website inspection and form submission.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

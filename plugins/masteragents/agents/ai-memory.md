@@ -1,7 +1,7 @@
 ---
 name: ai-memory
 description: >-
-  Solution for long term memory for agent coding CLIs and to facilitate handoff between different agent vendors
+  Cross-agent persistent memory bridge enabling state and context handoffs across different coding CLIs.
 ---
 
 # ai-memory Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **ai-memory** agent (upstream repository: [`akitaonrails/ai-memory`](https://github.com/akitaonrails/ai-memory), ⭐ 8,884).
 
 ## Overview & Specialization
-Solution for long term memory for agent coding CLIs and to facilitate handoff between different agent vendors
+Cross-agent persistent memory bridge enabling state and context handoffs across different coding CLIs.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

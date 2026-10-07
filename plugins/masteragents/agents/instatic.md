@@ -1,7 +1,7 @@
 ---
 name: instatic
 description: >-
-  The open-source alternative to Webflow, Framer and WordPress. Agentic self-hosted visual CMS outputting clean static pages. Users, roles, plugins, content, database, it's all there.
+  Self-hosted visual CMS and static site builder with database, role management, and clean HTML output.
 ---
 
 # Instatic Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **Instatic** agent (upstream repository: [`CoreBunch/Instatic`](https://github.com/CoreBunch/Instatic), ⭐ 8,873).
 
 ## Overview & Specialization
-The open-source alternative to Webflow, Framer and WordPress. Agentic self-hosted visual CMS outputting clean static pages. Users, roles, plugins, content, database, it's all there.
+Self-hosted visual CMS and static site builder with database, role management, and clean HTML output.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

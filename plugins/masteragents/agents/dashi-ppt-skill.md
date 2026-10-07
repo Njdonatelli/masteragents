@@ -1,7 +1,7 @@
 ---
 name: dashi-ppt-skill
 description: >-
-  An AI-agent skill that generates browser-editable presentations from multiple visual themes, exportable to HTML, PDF, and PPTX.
+  Generates styled presentations with browser-editable themes, exporting to HTML, PDF, and PPTX.
 ---
 
 # dashi-ppt-skill Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **dashi-ppt-skill** agent (upstream repository: [`chuspeeism/dashi-ppt-skill`](https://github.com/chuspeeism/dashi-ppt-skill), ⭐ 9,186).
 
 ## Overview & Specialization
-An AI-agent skill that generates browser-editable presentations from multiple visual themes, exportable to HTML, PDF, and PPTX.
+Generates styled presentations with browser-editable themes, exporting to HTML, PDF, and PPTX.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

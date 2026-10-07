@@ -1,7 +1,7 @@
 ---
 name: a-stock-data
 description: >-
-  A股全栈数据工具包：行情K线·当日逐笔·研报·信号·资金面·新闻·财务·公告·打板·ETF期权·舆情·宏观利率·期货大宗(含大商所日K)·事件驱动·可转债 | 15层·87端点·34数据源·除iwencai外免Key | A-share data for AI agents: K-lines, ticks, reports, fund flow, news, financials, filings, options, macro, futures, events, convertibles | 15 layers·87 endpoints·34 sources
+  Full-stack equities and financial market data tool fetching K-lines, tick logs, order flows, and fundamentals.
 ---
 
 # a-stock-data Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **a-stock-data** agent (upstream repository: [`simonlin1212/a-stock-data`](https://github.com/simonlin1212/a-stock-data), ⭐ 10,611).
 
 ## Overview & Specialization
-A股全栈数据工具包：行情K线·当日逐笔·研报·信号·资金面·新闻·财务·公告·打板·ETF期权·舆情·宏观利率·期货大宗(含大商所日K)·事件驱动·可转债 | 15层·87端点·34数据源·除iwencai外免Key | A-share data for AI agents: K-lines, ticks, reports, fund flow, news, financials, filings, options, macro, futures, events, convertibles | 15 layers·87 endpoints·34 sources
+Full-stack equities and financial market data tool fetching K-lines, tick logs, order flows, and fundamentals.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

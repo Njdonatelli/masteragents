@@ -1,7 +1,7 @@
 ---
 name: video-use
 description: >-
-  Edit videos with coding agents
+  Automates video editing, clip sequencing, subtitle generation, and media rendering via code.
 ---
 
 # video-use Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **video-use** agent (upstream repository: [`browser-use/video-use`](https://github.com/browser-use/video-use), ⭐ 28,263).
 
 ## Overview & Specialization
-Edit videos with coding agents
+Automates video editing, clip sequencing, subtitle generation, and media rendering via code.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

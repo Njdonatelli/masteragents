@@ -1,7 +1,7 @@
 ---
 name: hypit
 description: >-
-  Clone any viral video with AI agents. Not just a script, the whole workflow: swap the face, the words, the B-roll, ship 100 variants in one command, and get your 100M views.
+  Automates video content repurposing, script variation, b-roll assembly, and multi-variant production.
 ---
 
 # hypit Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **hypit** agent (upstream repository: [`hypit-ai/hypit`](https://github.com/hypit-ai/hypit), ⭐ 19,669).
 
 ## Overview & Specialization
-Clone any viral video with AI agents. Not just a script, the whole workflow: swap the face, the words, the B-roll, ship 100 variants in one command, and get your 100M views.
+Automates video content repurposing, script variation, b-roll assembly, and multi-variant production.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

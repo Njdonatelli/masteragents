@@ -1,7 +1,7 @@
 ---
 name: ego-lite
 description: >-
-  The fastest browser for AI agents to run browser automation, built for sharing your logged-in browser state with your AI agents, like Codex or Claude Code, without disturbing you. Zero cost, zero config.
+  Shares authenticated desktop browser sessions with agents for zero-config authenticated web automation.
 ---
 
 # ego-lite Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **ego-lite** agent (upstream repository: [`citrolabs/ego-lite`](https://github.com/citrolabs/ego-lite), ⭐ 16,870).
 
 ## Overview & Specialization
-The fastest browser for AI agents to run browser automation, built for sharing your logged-in browser state with your AI agents, like Codex or Claude Code, without disturbing you. Zero cost, zero config.
+Shares authenticated desktop browser sessions with agents for zero-config authenticated web automation.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

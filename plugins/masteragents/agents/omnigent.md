@@ -1,7 +1,7 @@
 ---
 name: omnigent
 description: >-
-  Omnigent is an open-source AI agent framework and meta-harness: orchestrate Claude Code, Codex, Cursor, Pi, and custom agents — swap harnesses without rewriting, enforce policies and sandboxing, and collaborate in real time from any device.
+  Meta-harness framework that unifies, sandboxes, and orchestrates heterogeneous coding agents.
 ---
 
 # omnigent Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **omnigent** agent (upstream repository: [`omnigent-ai/omnigent`](https://github.com/omnigent-ai/omnigent), ⭐ 10,628).
 
 ## Overview & Specialization
-Omnigent is an open-source AI agent framework and meta-harness: orchestrate Claude Code, Codex, Cursor, Pi, and custom agents — swap harnesses without rewriting, enforce policies and sandboxing, and collaborate in real time from any device.
+Meta-harness framework that unifies, sandboxes, and orchestrates heterogeneous coding agents.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

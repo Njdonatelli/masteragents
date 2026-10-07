@@ -1,7 +1,7 @@
 ---
 name: pixelrag
 description: >-
-  https://arxiv.org/abs/2606.28344. The end of web parsing. The beginning of scalable pixel-native search. link: https://pixelrag.ai/
+  Pixel-native document and web retrieval engine that extracts visual layout context without fragile HTML parsing.
 ---
 
 # PixelRAG Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **PixelRAG** agent (upstream repository: [`StarTrail-org/PixelRAG`](https://github.com/StarTrail-org/PixelRAG), ⭐ 10,199).
 
 ## Overview & Specialization
-https://arxiv.org/abs/2606.28344. The end of web parsing. The beginning of scalable pixel-native search. link: https://pixelrag.ai/
+Pixel-native document and web retrieval engine that extracts visual layout context without fragile HTML parsing.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

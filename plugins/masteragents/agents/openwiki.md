@@ -1,7 +1,7 @@
 ---
 name: openwiki
 description: >-
-  OpenWiki is a CLI that writes and maintains agent documentation for your codebase.
+  Generates and maintains codebase wikis, architecture references, and agent onboarding documentation.
 ---
 
 # openwiki Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **openwiki** agent (upstream repository: [`langchain-ai/openwiki`](https://github.com/langchain-ai/openwiki), ⭐ 16,992).
 
 ## Overview & Specialization
-OpenWiki is a CLI that writes and maintains agent documentation for your codebase.
+Generates and maintains codebase wikis, architecture references, and agent onboarding documentation.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

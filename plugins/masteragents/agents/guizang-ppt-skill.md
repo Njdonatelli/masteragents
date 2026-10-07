@@ -1,7 +1,7 @@
 ---
 name: guizang-ppt-skill
 description: >-
-  AI-agent Skill for generating polished HTML slide decks: editorial magazine and Swiss layouts, image prompts, social covers, and a WebGL/low-power presentation runtime.
+  Creates HTML presentation slide decks with editorial layouts, social covers, and responsive runtimes.
 ---
 
 # guizang-ppt-skill Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **guizang-ppt-skill** agent (upstream repository: [`op7418/guizang-ppt-skill`](https://github.com/op7418/guizang-ppt-skill), ⭐ 27,305).
 
 ## Overview & Specialization
-AI-agent Skill for generating polished HTML slide decks: editorial magazine and Swiss layouts, image prompts, social covers, and a WebGL/low-power presentation runtime.
+Creates HTML presentation slide decks with editorial layouts, social covers, and responsive runtimes.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

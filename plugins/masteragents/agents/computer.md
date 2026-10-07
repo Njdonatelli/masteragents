@@ -1,7 +1,7 @@
 ---
 name: computer
 description: >-
-  Give your agent a computer 👾
+  Provides sandbox desktop virtualization, mouse/keyboard inputs, and GUI OS control for agents.
 ---
 
 # computer Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **computer** agent (upstream repository: [`cloudflare/computer`](https://github.com/cloudflare/computer), ⭐ 9,495).
 
 ## Overview & Specialization
-Give your agent a computer 👾
+Provides sandbox desktop virtualization, mouse/keyboard inputs, and GUI OS control for agents.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

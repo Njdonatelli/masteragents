@@ -1,7 +1,7 @@
 ---
 name: grok-build
 description: >-
-  SpaceXAI's coding agent harness and TUI. Fullscreen, mouse interactive, extensible.
+  Terminal user interface harness for interactive, mouse-supported coding agent orchestration.
 ---
 
 # grok-build Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **grok-build** agent (upstream repository: [`xai-org/grok-build`](https://github.com/xai-org/grok-build), ⭐ 27,242).
 
 ## Overview & Specialization
-SpaceXAI's coding agent harness and TUI. Fullscreen, mouse interactive, extensible.
+Terminal user interface harness for interactive, mouse-supported coding agent orchestration.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

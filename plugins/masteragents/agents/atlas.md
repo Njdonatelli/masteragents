@@ -1,7 +1,7 @@
 ---
 name: atlas
 description: >-
-  Source control for agents. Use multiple coding agents, track their changes and query them in one place
+  Agent-native version control tracking diffs, prompt trajectories, and code rollbacks across multiple agents.
 ---
 
 # atlas Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **atlas** agent (upstream repository: [`pacifio/atlas`](https://github.com/pacifio/atlas), ⭐ 9,257).
 
 ## Overview & Specialization
-Source control for agents. Use multiple coding agents, track their changes and query them in one place
+Agent-native version control tracking diffs, prompt trajectories, and code rollbacks across multiple agents.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

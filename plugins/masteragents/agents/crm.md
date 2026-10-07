@@ -1,7 +1,7 @@
 ---
 name: crm
 description: >-
-  Comp AI CRM is an open source, CRM designed for AI agents. Agentic-first CRM.
+  Agentic CRM database API for programmatic customer management, lead pipelines, and interaction tracking.
 ---
 
 # crm Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **crm** agent (upstream repository: [`trycompai/crm`](https://github.com/trycompai/crm), ⭐ 11,100).
 
 ## Overview & Specialization
-Comp AI CRM is an open source, CRM designed for AI agents. Agentic-first CRM.
+Agentic CRM database API for programmatic customer management, lead pipelines, and interaction tracking.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

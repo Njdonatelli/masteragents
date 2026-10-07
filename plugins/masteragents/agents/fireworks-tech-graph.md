@@ -1,7 +1,7 @@
 ---
 name: fireworks-tech-graph
 description: >-
-  Generate production-quality SVG+PNG technical diagrams from natural language. 7 styles, UML support, and AI/Agent workflow patterns.
+  Generates SVG and PNG technical architecture diagrams, UML charts, and agent flowgraphs from plain text.
 ---
 
 # fireworks-tech-graph Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **fireworks-tech-graph** agent (upstream repository: [`yizhiyanhua-ai/fireworks-tech-graph`](https://github.com/yizhiyanhua-ai/fireworks-tech-graph), ⭐ 11,611).
 
 ## Overview & Specialization
-Generate production-quality SVG+PNG technical diagrams from natural language. 7 styles, UML support, and AI/Agent workflow patterns.
+Generates SVG and PNG technical architecture diagrams, UML charts, and agent flowgraphs from plain text.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

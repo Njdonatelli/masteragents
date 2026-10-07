@@ -1,7 +1,7 @@
 ---
 name: codeburn
 description: >-
-  Free, local tool to track AI coding token usage and cost across 37 tools and agents (Claude Code, Cursor, Codex, Gemini and more), by model, project, and task. npx codeburn
+  Tracks and analyzes AI coding token consumption, model spend, and session costs locally.
 ---
 
 # codeburn Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **codeburn** agent (upstream repository: [`getagentseal/codeburn`](https://github.com/getagentseal/codeburn), ⭐ 11,344).
 
 ## Overview & Specialization
-Free, local tool to track AI coding token usage and cost across 37 tools and agents (Claude Code, Cursor, Codex, Gemini and more), by model, project, and task. npx codeburn
+Tracks and analyzes AI coding token consumption, model spend, and session costs locally.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

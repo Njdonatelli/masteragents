@@ -1,7 +1,7 @@
 ---
 name: open-design
 description: >-
-  🎨 Best DeepSeek Harness Design Plugin. The open-source Claude Design alternative. 🖥️ Local-first desktop app. 🖼️ Your coding agent becomes the design engine: prototypes, landing pages, dashboards, slides, images & video — real files, HTML/PDF/PPTX/MP4 export. 🤖 Claude Code / Codex / Cursor / DeepSeek Harness / OpenCode & 20+ CLIs via BYOK.
+  Generates UI prototypes, landing pages, slide decks, and diagrams. Exports to HTML, PDF, PPTX, and MP4.
 ---
 
 # open-design Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **open-design** agent (upstream repository: [`nexu-io/open-design`](https://github.com/nexu-io/open-design), ⭐ 99,710).
 
 ## Overview & Specialization
-🎨 Best DeepSeek Harness Design Plugin. The open-source Claude Design alternative. 🖥️ Local-first desktop app. 🖼️ Your coding agent becomes the design engine: prototypes, landing pages, dashboards, slides, images & video — real files, HTML/PDF/PPTX/MP4 export. 🤖 Claude Code / Codex / Cursor / DeepSeek Harness / OpenCode & 20+ CLIs via BYOK.
+Generates UI prototypes, landing pages, slide decks, and diagrams. Exports to HTML, PDF, PPTX, and MP4.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

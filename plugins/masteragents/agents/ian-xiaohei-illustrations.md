@@ -1,7 +1,7 @@
 ---
 name: ian-xiaohei-illustrations
 description: >-
-  中文小黑怪诞正文配图生成 Skill | 16:9 白底手绘 | 少量红橙蓝批注 | Codex Skill
+  Generates minimalist hand-drawn illustration prompts and SVG technical annotations for editorial content.
 ---
 
 # ian-xiaohei-illustrations Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **ian-xiaohei-illustrations** agent (upstream repository: [`helloianneo/ian-xiaohei-illustrations`](https://github.com/helloianneo/ian-xiaohei-illustrations), ⭐ 12,379).
 
 ## Overview & Specialization
-中文小黑怪诞正文配图生成 Skill | 16:9 白底手绘 | 少量红橙蓝批注 | Codex Skill
+Generates minimalist hand-drawn illustration prompts and SVG technical annotations for editorial content.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

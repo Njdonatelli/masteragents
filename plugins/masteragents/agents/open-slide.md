@@ -1,7 +1,7 @@
 ---
 name: open-slide
 description: >-
-  A slide framework built for agents.
+  Declarative markdown slide deck generator designed for rapid AI slide authoring and rendering.
 ---
 
 # open-slide Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **open-slide** agent (upstream repository: [`open-slide/open-slide`](https://github.com/open-slide/open-slide), ⭐ 9,037).
 
 ## Overview & Specialization
-A slide framework built for agents.
+Declarative markdown slide deck generator designed for rapid AI slide authoring and rendering.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

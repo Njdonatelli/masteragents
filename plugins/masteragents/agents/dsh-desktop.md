@@ -1,7 +1,7 @@
 ---
 name: dsh-desktop
 description: >-
-  DSHDesktop：DeepSeek Harness Desktop / DeepSeek Harness 桌面版
+  Desktop GUI dashboard for running, monitoring, and debugging DeepSeek Harness agent workflows.
 ---
 
 # dsh-desktop Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **dsh-desktop** agent (upstream repository: [`dataelement/dsh-desktop`](https://github.com/dataelement/dsh-desktop), ⭐ 12,052).
 
 ## Overview & Specialization
-DSHDesktop：DeepSeek Harness Desktop / DeepSeek Harness 桌面版
+Desktop GUI dashboard for running, monitoring, and debugging DeepSeek Harness agent workflows.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

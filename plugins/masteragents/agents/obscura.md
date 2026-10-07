@@ -1,7 +1,7 @@
 ---
 name: obscura
 description: >-
-  The headless browser for AI agents and web scraping
+  Headless browser automation tool for web scraping, DOM interaction, and data extraction.
 ---
 
 # obscura Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **obscura** agent (upstream repository: [`h4ckf0r0day/obscura`](https://github.com/h4ckf0r0day/obscura), ⭐ 28,581).
 
 ## Overview & Specialization
-The headless browser for AI agents and web scraping
+Headless browser automation tool for web scraping, DOM interaction, and data extraction.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

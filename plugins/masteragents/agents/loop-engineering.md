@@ -1,7 +1,7 @@
 ---
 name: loop-engineering
 description: >-
-  Practical patterns, starters & CLI tools for loop engineering with AI coding agents. Design systems that prompt and orchestrate agents (inspired by Addy Osmani and Boris Cherny). Includes loop-audit, loop-init, loop-cost.
+  Designs, audits, and cost-monitors autonomous agent feedback loops, retries, and orchestration chains.
 ---
 
 # loop-engineering Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **loop-engineering** agent (upstream repository: [`cobusgreyling/loop-engineering`](https://github.com/cobusgreyling/loop-engineering), ⭐ 11,428).
 
 ## Overview & Specialization
-Practical patterns, starters & CLI tools for loop engineering with AI coding agents. Design systems that prompt and orchestrate agents (inspired by Addy Osmani and Boris Cherny). Includes loop-audit, loop-init, loop-cost.
+Designs, audits, and cost-monitors autonomous agent feedback loops, retries, and orchestration chains.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

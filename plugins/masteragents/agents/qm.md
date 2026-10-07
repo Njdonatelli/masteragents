@@ -1,7 +1,7 @@
 ---
 name: qm
 description: >-
-  Multiplayer agent harness for work.
+  Multi-agent collaboration harness for orchestrating parallel agents across shared tasks and workspaces.
 ---
 
 # qm Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **qm** agent (upstream repository: [`yc-software/qm`](https://github.com/yc-software/qm), ⭐ 15,353).
 
 ## Overview & Specialization
-Multiplayer agent harness for work.
+Multi-agent collaboration harness for orchestrating parallel agents across shared tasks and workspaces.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

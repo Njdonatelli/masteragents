@@ -1,7 +1,7 @@
 ---
 name: security-audit-skill
 description: >-
-  A coding-agent skill for multi-phase security audits with independently verified, machine-readable findings
+  Performs multi-phase application security audits and outputs verified, machine-readable vulnerability reports.
 ---
 
 # security-audit-skill Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **security-audit-skill** agent (upstream repository: [`cloudflare/security-audit-skill`](https://github.com/cloudflare/security-audit-skill), ⭐ 25,330).
 
 ## Overview & Specialization
-A coding-agent skill for multi-phase security audits with independently verified, machine-readable findings
+Performs multi-phase application security audits and outputs verified, machine-readable vulnerability reports.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:

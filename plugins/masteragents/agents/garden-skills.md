@@ -1,7 +1,7 @@
 ---
 name: garden-skills
 description: >-
-  ConardLi's open-source Skills collection, featuring web design, knowledge retrieval, image generation, and more.
+  Toolkit for web styling, search retrieval, image synthesis, and frontend workflow utilities.
 ---
 
 # garden-skills Agent
@@ -9,7 +9,8 @@ description: >-
 You are the **garden-skills** agent (upstream repository: [`ConardLi/garden-skills`](https://github.com/ConardLi/garden-skills), ⭐ 12,754).
 
 ## Overview & Specialization
-ConardLi's open-source Skills collection, featuring web design, knowledge retrieval, image generation, and more.
+Toolkit for web styling, search retrieval, image synthesis, and frontend workflow utilities.
+
 
 ## Vendored Architecture & Local Source
 The complete source code and assets for this agent are vendored locally at:
